@@ -1,3 +1,6 @@
+From iris.algebra.lib Require Import mono_list.
+From iris.base_logic.lib Require Import invariants mono_nat.
+From iris.program_logic Require Import atomic.
 From iris.heap_lang Require Import lang proofmode notation.
 
 (* Queue layout: [mutex, head_block, head_idx, tail_block, tail_idx, capacity]
@@ -168,3 +171,162 @@ Definition chunked_queue_size : val :=
     if: "head" < "tail"
     then "tail" - "head"
     else #0.
+
+(* ================================================================ *)
+(*                         SPECIFICATION                            *)
+(* ================================================================ *)
+
+(** Ghost State:
+    - mono_list (leibnizO val): authoritative append-only list L
+      representing the logical history of all pushed elements.
+    - mono_nat (×2): monotonic counters for head_idx and tail_idx. *)
+
+Class chunked_queueG Σ := ChunkedQueueG {
+  cq_mono_listG :: inG Σ (mono_listR (leibnizO val));
+  cq_mono_natG :: mono_natG Σ;
+}.
+
+Definition chunked_queueΣ : gFunctors :=
+  #[ GFunctor (mono_listR (leibnizO val)); mono_natΣ ].
+
+Global Instance subG_chunked_queueΣ {Σ} :
+  subG chunked_queueΣ Σ → chunked_queueG Σ.
+Proof. solve_inG. Qed.
+
+Record queue_name := QueueName {
+  γ_list : gname;
+  γ_head : gname;
+  γ_tail : gname;
+}.
+
+Section spec.
+  Context `{!heapGS Σ, !chunked_queueG Σ}.
+  Implicit Types (γ : queue_name) (q : loc).
+
+  Let queueN := nroot .@ "chunked_queue".
+  Let BS := Z.to_nat CHUNKED_QUEUE_BLOCK_SIZE.
+
+  (* -------------------------------------------------------------- *)
+  (*  @inv(Slot Ownership)                                           *)
+  (*  Empty (0):   invariant owns state AND value.                   *)
+  (*               No thread may read/write value.                   *)
+  (*  Writing (1): producer holds exclusive value permission.         *)
+  (*               Invariant owns state only.                        *)
+  (*  Valid (2):   producer relinquished permission.                  *)
+  (*               Invariant owns state AND value ↦ data.            *)
+  (*               data matches ghost list at position pos.          *)
+  (* -------------------------------------------------------------- *)
+  Definition slot_inv (L : list val) (pos : nat) (slot_loc : loc) : iProp Σ :=
+    ∃ (state : Z), (slot_loc +ₗ 1) ↦ #state ∗
+    ( (⌜state = 0⌝ ∗ slot_loc ↦ #0)
+    ∨ (⌜state = 1⌝)
+    ∨ (⌜state = 2⌝ ∗ ∃ v, slot_loc ↦ v ∗ ⌜L !! pos = Some v⌝) ).
+
+  (* -------------------------------------------------------------- *)
+  (*  Block: [next, block_id, slot_0_val, slot_0_state, ...]         *)
+  (* -------------------------------------------------------------- *)
+  Definition is_block (L : list val) (b : loc) (bid : Z)
+      (next : loc) : iProp Σ :=
+    (b +ₗ 0) ↦ #next ∗
+    (b +ₗ 1) ↦ #bid ∗
+    [∗ list] i ∈ seq 0 BS,
+      slot_inv L (Z.to_nat bid * BS + i) (b +ₗ (2 + 2 * Z.of_nat i)).
+
+  (* -------------------------------------------------------------- *)
+  (*  Circular block chain                                           *)
+  (* -------------------------------------------------------------- *)
+  Definition block_next (blocks : list (loc * Z)) (i : nat)
+      (first : loc) : loc :=
+    match blocks !! (S i) with
+    | Some (b, _) => b
+    | None => first
+    end.
+
+  Definition is_block_chain (L : list val) (blocks : list (loc * Z))
+      (first : loc) : iProp Σ :=
+    [∗ list] i↦blk ∈ blocks,
+      let '(b, bid) := blk in
+      is_block L b bid (block_next blocks i first).
+
+  (* -------------------------------------------------------------- *)
+  (*  @inv(Queue State)                                              *)
+  (*  Ghost state: authoritative append-only list L.                 *)
+  (*  tail_idx = |L|, monotonically increasing ticket counter.       *)
+  (*  head_idx ≤ tail_idx, monotonically increasing pop counter.     *)
+  (* -------------------------------------------------------------- *)
+  Definition queue_inv_inner (γ : queue_name) (q : loc) : iProp Σ :=
+    ∃ (L : list val) (h t : nat)
+      (lock_val : Z) (hb tb : loc) (cap : Z)
+      (blocks : list (loc * Z)),
+    own γ.(γ_list) (●ML{# (1/2)%Qp} L) ∗
+    mono_nat_auth_own γ.(γ_head) (1/2)%Qp h ∗
+    mono_nat_auth_own γ.(γ_tail) (1/2)%Qp t ∗
+    ⌜t = length L⌝ ∗
+    ⌜h ≤ t⌝ ∗
+    (q +ₗ 0) ↦ #lock_val ∗ ⌜lock_val = 0 ∨ lock_val = 1⌝ ∗
+    (q +ₗ 1) ↦ #hb ∗
+    (q +ₗ 2) ↦ #(Z.of_nat h) ∗
+    (q +ₗ 3) ↦ #tb ∗
+    (q +ₗ 4) ↦ #(Z.of_nat t) ∗
+    (q +ₗ 5) ↦ #cap ∗
+    ⌜blocks ≠ []⌝ ∗
+    ⌜cap = (Z.of_nat (length blocks) * CHUNKED_QUEUE_BLOCK_SIZE)%Z⌝ ∗
+    ⌜(Z.of_nat t ≤ cap)%Z⌝ ∗
+    ⌜hb ∈ fst <$> blocks⌝ ∗
+    ⌜tb ∈ fst <$> blocks⌝ ∗
+    match blocks with
+    | [] => True
+    | (first, _) :: _ => is_block_chain L blocks first
+    end.
+
+  Definition is_queue (γ : queue_name) (q : loc) : iProp Σ :=
+    inv queueN (queue_inv_inner γ q).
+
+  Global Instance is_queue_persistent γ q : Persistent (is_queue γ q).
+  Proof. apply _. Qed.
+
+  (* -------------------------------------------------------------- *)
+  (*  Client-facing abstract queue content                           *)
+  (* -------------------------------------------------------------- *)
+  Definition queue_content (γ : queue_name)
+      (L : list val) (h : nat) : iProp Σ :=
+    own γ.(γ_list) (●ML{# (1/2)%Qp} L) ∗
+    mono_nat_auth_own γ.(γ_head) (1/2)%Qp h ∗
+    mono_nat_auth_own γ.(γ_tail) (1/2)%Qp (length L).
+
+  (* -------------------------------------------------------------- *)
+  (*  Logically Atomic Specifications                                *)
+  (* -------------------------------------------------------------- *)
+
+  Lemma chunked_queue_init_spec (q : loc) :
+    {{{ q ↦∗ replicate 6 #0 }}}
+      chunked_queue_init #q
+    {{{ γ, RET #(); is_queue γ q ∗ queue_content γ [] 0 }}}.
+  Proof. Admitted.
+
+  (** @spec: logically atomic push that appends data to L.
+      @linpoint: FAA on queue.tail_idx. *)
+  Lemma chunked_queue_push_spec γ (q : loc) (v : val) :
+    is_queue γ q -∗
+    <<{ ∀∀ (L : list val) (h : nat), queue_content γ L h }>>
+      chunked_queue_push #q v @ ↑queueN
+    <<{ queue_content γ (L ++ [v]) h | RET #() }>>.
+  Proof. Admitted.
+
+  (** @spec: logically atomic pop that removes head from L.
+      @linpoint: CAS on queue.head_idx. *)
+  Lemma chunked_queue_pop_spec γ (q : loc) :
+    is_queue γ q -∗
+    <<{ ∀∀ (L : list val) (h : nat), queue_content γ L h }>>
+      chunked_queue_pop #q @ ↑queueN
+    <<{ ∃∃ (w : val) (ok : bool),
+        (⌜ok = true⌝ ∗
+          ∃ d, ⌜w = InjRV d⌝ ∗ ⌜L !! h = Some d⌝ ∗
+               queue_content γ L (S h)) ∨
+        (⌜ok = false⌝ ∗
+          ⌜w = InjLV #()⌝ ∗ ⌜h = length L⌝ ∗
+          queue_content γ L h)
+      | RET (w, #ok)%V }>>.
+  Proof. Admitted.
+
+End spec.
