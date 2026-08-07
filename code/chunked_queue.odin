@@ -111,8 +111,8 @@ chunked_queue_push :: proc(queue: ^Chunked_Queue($T), data: T) {
 			if cursor.block_id == block_id {
 				slot := &cursor.data[slot_idx]
 				sync.atomic_store_explicit(&slot.state, .Writing, .Relaxed)
-				sync.atomic_store_explicit(&slot.state, .Valid, .Release)
 				slot.value = data
+				sync.atomic_store_explicit(&slot.state, .Valid, .Release)
 				return
 			}
 			cursor = cursor.next
