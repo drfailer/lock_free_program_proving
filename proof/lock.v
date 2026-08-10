@@ -42,12 +42,39 @@ Section spec.
     {{{ is_lock γ l R }}}
       acquire #l
     {{{ RET #(); locked γ ∗ R }}}.
-  Proof. Admitted.
+  Proof.
+    iIntros (Φ) "#Hlock HΦ".
+    iLöb as "IH".
+    wp_rec. wp_bind (CmpXchg _ _ _).
+    iInv "Hlock" as (b) "[Hl Hrest]".
+    destruct (decide (b = 0)) as [->|Hb0].
+    - wp_cmpxchg_suc. { done. }
+      iDestruct "Hrest" as "[_ [Htok HR]]".
+      iModIntro. iSplitL "Hl".
+      { iNext. unfold lock_inv. iExists 1. iFrame "Hl".
+        iSplit; first (iPureIntro; right; done). simpl. done. }
+      wp_pures. iApply "HΦ". iFrame. by iModIntro.
+    - wp_cmpxchg_fail. { intros H. inversion H. lia. }
+      iDestruct "Hrest" as "[%Hbv Hrest]".
+      iModIntro. iSplitL "Hl Hrest".
+      { iNext. unfold lock_inv. iExists b. iFrame "Hl". iSplit; first done.
+        destruct (decide (b = 0)); first contradiction. done. }
+      wp_proj. wp_if. iApply ("IH" with "HΦ").
+  Defined.
 
   Lemma release_spec γ (l : loc) R :
     {{{ is_lock γ l R ∗ locked γ ∗ R }}}
       release #l
     {{{ RET #(); True }}}.
-  Proof. Admitted.
+  Proof.
+    iIntros (Φ) "(#Hlock & Htok & HR) HΦ".
+    unfold release. wp_pures.
+    iInv "Hlock" as (b) "[Hl Hrest]".
+    wp_store.
+    iModIntro. iSplitL "Hl Htok HR".
+    - iNext. unfold lock_inv. iExists 0. iFrame "Hl".
+      iSplit; first (iPureIntro; left; done). simpl. iFrame.
+    - iApply "HΦ". done.
+  Defined.
 
 End spec.
