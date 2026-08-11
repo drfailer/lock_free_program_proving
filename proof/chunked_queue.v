@@ -204,6 +204,7 @@ Record queue_name := QueueName {
   γ_head : gname;
   γ_tail : gname;
   γ_claims : gname;
+  γ_writes : gname;
 }.
 
 Section spec.
@@ -223,22 +224,22 @@ Section spec.
   (*               Invariant owns state AND value ↦ data.            *)
   (*               data matches ghost list at position pos.          *)
   (* -------------------------------------------------------------- *)
-  Definition slot_inv (γc : gname) (L : list val) (pos : nat) (slot_loc : loc) : iProp Σ :=
+  Definition slot_inv (γc γw : gname) (L : list val) (pos : nat) (slot_loc : loc) : iProp Σ :=
     ∃ (state : Z), (slot_loc +ₗ 1) ↦ #state ∗
     ( (⌜state = 0⌝ ∗ ∃ w, slot_loc ↦ w)
-    ∨ (⌜state = 1⌝)
-    ∨ (⌜state = 2⌝ ∗ ∃ v, slot_loc ↦ v ∗ ⌜L !! pos = Some v⌝)
-    ∨ (⌜state = 2⌝ ∗ pos ↪[γc] ()) ).
+    ∨ (⌜state = 1⌝ ∗ pos ↪[γw] ())
+    ∨ (⌜state = 2⌝ ∗ ∃ v, slot_loc ↦ v ∗ ⌜L !! pos = Some v⌝ ∗ pos ↪[γw] ())
+    ∨ (⌜state = 2⌝ ∗ pos ↪[γc] () ∗ pos ↪[γw] ()) ).
 
   (* -------------------------------------------------------------- *)
   (*  Block: [next, block_id, slot_0_val, slot_0_state, ...]         *)
   (* -------------------------------------------------------------- *)
-  Definition is_block (γc : gname) (L : list val) (b : loc) (bid : Z)
+  Definition is_block (γc γw : gname) (L : list val) (b : loc) (bid : Z)
       (next : loc) : iProp Σ :=
     (b +ₗ 0) ↦ #next ∗
     (b +ₗ 1) ↦ #bid ∗
     [∗ list] i ∈ seq 0 BS,
-      slot_inv γc L (Z.to_nat bid * BS + i) (b +ₗ (2 + 2 * Z.of_nat i)).
+      slot_inv γc γw L (Z.to_nat bid * BS + i) (b +ₗ (2 + 2 * Z.of_nat i)).
 
   (* -------------------------------------------------------------- *)
   (*  Circular block chain                                           *)
@@ -250,11 +251,11 @@ Section spec.
     | None => first
     end.
 
-  Definition is_block_chain (γc : gname) (L : list val) (blocks : list (loc * Z))
+  Definition is_block_chain (γc γw : gname) (L : list val) (blocks : list (loc * Z))
       (first : loc) : iProp Σ :=
     [∗ list] i↦blk ∈ blocks,
       let '(b, bid) := blk in
-      is_block γc L b bid (block_next blocks i first).
+      is_block γc γw L b bid (block_next blocks i first).
 
   (* -------------------------------------------------------------- *)
   (*  @inv(Queue State)                                              *)
@@ -266,12 +267,13 @@ Section spec.
     ∃ (L : list val) (h t : nat)
       (lock_val : Z) (hb tb : loc) (cap : Z)
       (blocks : list (loc * Z))
-      (hi ti : nat) (C : gmap nat ()),
+      (hi ti : nat) (C W : gmap nat ()),
     own γ.(γ_list) (●ML{# (1/2)%Qp} L) ∗
     own γ.(γ_blocks) (●ML (blocks.*1)) ∗
     mono_nat_auth_own γ.(γ_head) (1/2)%Qp h ∗
     mono_nat_auth_own γ.(γ_tail) (1/2)%Qp t ∗
     ghost_map_auth γ.(γ_claims) 1 C ∗
+    ghost_map_auth γ.(γ_writes) 1 W ∗
     ⌜t = length L⌝ ∗
     ⌜h ≤ t⌝ ∗
     (q +ₗ 0) ↦ #lock_val ∗ ⌜lock_val = 0 ∨ lock_val = 1⌝ ∗
@@ -288,7 +290,7 @@ Section spec.
     ⌜∀ k : nat, h ≤ k → C !! k = None⌝ ∗
     match blocks with
     | [] => True
-    | (first, _) :: _ => is_block_chain γ.(γ_claims) L blocks first
+    | (first, _) :: _ => is_block_chain γ.(γ_claims) γ.(γ_writes) L blocks first
     end.
 
   Definition is_queue (γ : queue_name) (q : loc) : iProp Σ :=
@@ -345,14 +347,15 @@ Section spec.
     iMod (mono_nat_own_alloc 0) as (γ_head) "[Hhead_auth _]".
     iMod (mono_nat_own_alloc 0) as (γ_tail) "[Htail_auth _]".
     iMod (ghost_map_alloc_empty) as (γ_claims) "Hclaims".
+    iMod (ghost_map_alloc_empty) as (γ_writes) "Hwrites".
     iDestruct "Hhead_auth" as "[Hhead1 Hhead2]".
     iDestruct "Htail_auth" as "[Htail1 Htail2]".
-    set (γ := QueueName γ_list γ_blocks γ_head γ_tail γ_claims).
+    set (γ := QueueName γ_list γ_blocks γ_head γ_tail γ_claims γ_writes).
     iApply ("HΦ" $! γ). iSplitR "Hauth2 Hhead2 Htail2".
     2:{ unfold queue_content. simpl. iFrame. iModIntro. done. }
     iApply inv_alloc. iNext. unfold queue_inv_inner.
-    iExists [], 0%nat, 0%nat, 0%Z, block, block, CHUNKED_QUEUE_BLOCK_SIZE, [(block, 0%Z)], 0%nat, 0%nat, ∅.
-    simpl. iFrame "Hauth1 Hblk_auth Hhead1 Htail1 Hclaims".
+    iExists [], 0%nat, 0%nat, 0%Z, block, block, CHUNKED_QUEUE_BLOCK_SIZE, [(block, 0%Z)], 0%nat, 0%nat, ∅, ∅.
+    simpl. iFrame "Hauth1 Hblk_auth Hhead1 Htail1 Hclaims Hwrites".
     rewrite Loc.add_0. iFrame "Hq0 Hq1 Hq2 Hq3 Hq4 Hq5".
     iSplit; first done.
     iSplit; first (iPureIntro; lia).
@@ -367,7 +370,7 @@ Section spec.
     change BS with 64%nat. change (Z.to_nat 0) with 0%nat.
     iAssert (∀ (n : nat), ⌜(n ≤ 64)%nat⌝ -∗
       (block +ₗ (2 + 2 * Z.of_nat (64 - n))) ↦∗ replicate (2 * n) #0 -∗
-      [∗ list] i ∈ seq (64 - n) n, slot_inv γ_claims [] (0 * 64 + i)%nat (block +ₗ (2 + 2 * Z.of_nat i)))%I as "Hind".
+      [∗ list] i ∈ seq (64 - n) n, slot_inv γ_claims γ_writes [] (0 * 64 + i)%nat (block +ₗ (2 + 2 * Z.of_nat i)))%I as "Hind".
     { iIntros (n).
       iInduction n as [|n'] "IH".
       - iIntros "% Hblock". done.
@@ -406,29 +409,243 @@ Section spec.
   Proof. Admitted.
 
   Lemma push_find_block_inner_spec γ (q : loc) (cursor start : loc)
-      (pos : nat) (v : val) (L : list val)
-      (Hlookup : L !! pos = Some v) :
+      (pos : nat) (v : val) (L : list val) (blocks : list (loc * Z))
+      (Hlookup : L !! pos = Some v)
+      (Hcursor_in : ∃ ci, blocks.*1 !! ci = Some cursor) :
     {{{ is_queue γ q ∗
-        own γ.(γ_list) (◯ML (L : list (leibnizO val))) }}}
+        own γ.(γ_list) (◯ML (L : list (leibnizO val))) ∗
+        own γ.(γ_blocks) (◯ML (blocks.*1 : list (leibnizO loc))) ∗
+        pos ↪[γ.(γ_writes)] () }}}
       chunked_queue_push_find_block #cursor #start
         #(Z.quot (Z.of_nat pos) CHUNKED_QUEUE_BLOCK_SIZE)
         #(Z.rem (Z.of_nat pos) CHUNKED_QUEUE_BLOCK_SIZE)
         v
     {{{ r, RET r;
-        (⌜r = SOMEV #()⌝) ∨ ⌜r = NONEV⌝ }}}.
-  Proof. Admitted.
+        (⌜r = SOMEV #()⌝) ∨
+        (⌜r = NONEV⌝ ∗ pos ↪[γ.(γ_writes)] ()) }}}.
+  Proof.
+    iIntros (Φ) "(#Hinv & #Hlb_L & #Hlb_blocks & Hwtok) HΦ".
+    destruct Hcursor_in as [ci Hci].
+    set (block_id := Z.quot (Z.of_nat pos) CHUNKED_QUEUE_BLOCK_SIZE).
+    set (slot_idx := Z.rem (Z.of_nat pos) CHUNKED_QUEUE_BLOCK_SIZE).
+    unfold chunked_queue_push_find_block.
+
+    assert (Z.to_nat slot_idx < BS) as Hsi_lt.
+    { unfold slot_idx, BS, CHUNKED_QUEUE_BLOCK_SIZE.
+      apply Z2Nat.inj_lt.
+      - apply Z.rem_nonneg; lia.
+      - lia.
+      - apply Z.rem_bound_pos; lia. }
+    assert (∀ c : nat, Z.of_nat c = block_id →
+            pos = c * BS + Z.to_nat slot_idx) as Hdecomp_pre.
+    { unfold block_id, slot_idx, BS, CHUNKED_QUEUE_BLOCK_SIZE. intros c Heq.
+      assert (Hnn: (0 ≤ Z.rem (Z.of_nat pos) 64)%Z) by (apply Z.rem_nonneg; lia).
+      assert (Hqr: (Z.of_nat pos = 64 * Z.quot (Z.of_nat pos) 64 + Z.rem (Z.of_nat pos) 64)%Z)
+        by (apply Z.quot_rem'; lia).
+      rewrite <- Heq in Hqr. lia. }
+
+    iLöb as "IH" forall (cursor ci blocks Hci) "Hlb_blocks".
+    wp_rec. wp_pures.
+    (* Load cursor.block_id *)
+    wp_bind (! _)%E.
+    iInv "Hinv" as (Li hi ti lvi hbi tbi capi blocksi hii tii Ci Wi)
+      ">(Hai & Hbai & Hhi & Hti & Hclaimsi & Hwritesi & %Hti_eq & %Hhti & Hlki & %Hlvi &
+         Hhbi & Hhli & Htbi & Htli & Hcapi &
+         %Hnei & %Hcei & %Hhii & %Htii & %Hbidsi & %Hcfreshi & Hchi)".
+    iDestruct (own_valid_2 with "Hbai Hlb_blocks") as %[_ Hpfx]%mono_list_both_dfrac_valid_L.
+    assert (blocksi.*1 !! ci = Some cursor) as Hci_cur
+      by (eapply prefix_lookup_Some; [exact Hci | exact Hpfx]).
+    assert (∃ bid_i, blocksi !! ci = Some (cursor, bid_i)) as [bid_i Hcur_blk].
+    { rewrite list_lookup_fmap in Hci_cur.
+      destruct (blocksi !! ci) as [[? ?]|]; [simpl in *; simplify_eq; eauto|done]. }
+    assert (bid_i = Z.of_nat ci) as -> by (apply (Hbidsi _ _ Hcur_blk)).
+    destruct blocksi as [|[firsti fbi] blocksi']; first done.
+    iDestruct (big_sepL_lookup_acc with "Hchi") as "[Hblk Hrest]"; first exact Hcur_blk.
+    iDestruct "Hblk" as "(Hnext & Hbid & Hslots)". wp_load.
+    iDestruct ("Hrest" with "[Hnext Hbid Hslots]") as "Hchi"; first (iFrame).
+    iModIntro. iSplitR "Hwtok HΦ".
+    { iNext. iExists Li,hi,ti,lvi,hbi,tbi,capi,((firsti,fbi)::blocksi'),hii,tii,Ci,Wi. iFrame. done. }
+    wp_pures.
+    destruct (decide (Z.of_nat ci = block_id)) as [Heq|Hne].
+    - (* Correct block — do the three stores *)
+      rewrite bool_decide_eq_true_2; last (subst block_id; rewrite Heq; done).
+      wp_pures.
+      pose proof (Hdecomp_pre ci Heq) as Hpos_decomp.
+      set (si := Z.to_nat slot_idx).
+      assert (seq 0 BS !! si = Some si) as Hseq by (apply lookup_seq; lia).
+      (* Store 1: state ← 1 (Empty → Writing) *)
+      wp_bind (_ <- _)%E.
+      iInv "Hinv" as (Lw hw tw lvw hbw tbw capw blocksw hiw tiw Cw Ww)
+        ">(Haw & Hbaw & Hhw & Htw & Hclaimsw & Hwritesw & %Htw & %Hhtw & Hlkw & %Hlvw &
+           Hhbw & Hhlw & Htbw & Htlw & Hcapw &
+           %Hnew & %Hcew & %Hhiw & %Htiw & %Hbidsw & %Hcfw & Hchw)".
+      iDestruct (own_valid_2 with "Hbaw Hlb_blocks") as %[_ Hpfxw]%mono_list_both_dfrac_valid_L.
+      assert (blocksw.*1 !! ci = Some cursor) as Hciw
+        by (eapply prefix_lookup_Some; [exact Hci | exact Hpfxw]).
+      assert (∃ bw, blocksw !! ci = Some (cursor, bw)) as [bw Hblkw].
+      { rewrite list_lookup_fmap in Hciw.
+        destruct (blocksw !! ci) as [[? ?]|]; [simpl in *; simplify_eq; eauto|done]. }
+      assert (bw = Z.of_nat ci) as -> by (apply (Hbidsw _ _ Hblkw)).
+      destruct blocksw as [|[fw fbw] blocksw']; first done.
+      iDestruct (big_sepL_lookup_acc with "Hchw") as "[Hblk Hrest]"; first exact Hblkw.
+      iDestruct "Hblk" as "(Hn & Hb & Hsl)".
+      iDestruct (big_sepL_lookup_acc with "Hsl") as "[Hslot Hsl_rest]"; first exact Hseq.
+      replace (Z.of_nat si) with slot_idx
+        by (subst si; symmetry; apply Z2Nat.id; unfold slot_idx; apply Z.rem_nonneg; lia).
+      assert (Hpos_eq : Z.to_nat (Z.of_nat ci) * BS + si = pos)
+        by (rewrite Nat2Z.id; lia).
+      iDestruct "Hslot" as (st) "[Hst Hcases]".
+      iDestruct "Hcases" as "[H0|[H1|[H2|H3]]]".
+      + (* Empty — expected case *)
+        iDestruct "H0" as "[% Hv]". subst st. iDestruct "Hv" as (w) "Hv".
+        wp_store.
+        iDestruct ("Hsl_rest" with "[Hst Hwtok]") as "Hsl".
+        { iExists 1. iFrame. iRight. iLeft. iSplit; [done|]. rewrite Hpos_eq. iFrame. }
+        iDestruct ("Hrest" with "[Hn Hb Hsl]") as "Hch"; first iFrame.
+        iModIntro. iSplitR "Hv HΦ".
+        { iNext. iExists Lw,hw,tw,lvw,hbw,tbw,capw,((fw,fbw)::blocksw'),hiw,tiw,Cw,Ww. iFrame. done. }
+        wp_pures.
+        (* Store 2: slot ← data *)
+        wp_store.
+        wp_pures.
+        (* Store 3: state ← 2 (Writing → Valid) *)
+        wp_bind (_ <- _)%E.
+        iInv "Hinv" as (Lr hr tr lvr hbr tbr capr blocksr hir tir Cr Wr)
+          ">(Har & Hbar & Hhr & Htr & Hclr & Hwrr & %Htr & %Hhtr & Hlkr & %Hlvr &
+             Hhbr & Hhlr & Htbr & Htlr & Hcpr &
+             %Hner & %Hcer & %Hhir & %Htir & %Hbidsr & %Hcfr & Hchr)".
+        iDestruct (own_valid_2 with "Hbar Hlb_blocks") as %[_ Hpfxr]%mono_list_both_dfrac_valid_L.
+        assert (blocksr.*1 !! ci = Some cursor) as Hcir
+          by (eapply prefix_lookup_Some; [exact Hci | exact Hpfxr]).
+        assert (∃ br, blocksr !! ci = Some (cursor, br)) as [br Hblkr].
+        { rewrite list_lookup_fmap in Hcir.
+          destruct (blocksr !! ci) as [[? ?]|]; [simpl in *; simplify_eq; eauto|done]. }
+        assert (br = Z.of_nat ci) as -> by (apply (Hbidsr _ _ Hblkr)).
+        destruct blocksr as [|[fr fbr] blocksr']; first done.
+        iDestruct (big_sepL_lookup_acc with "Hchr") as "[Hblk2 Hrest2]"; first exact Hblkr.
+        iDestruct "Hblk2" as "(Hn2 & Hb2 & Hsl2)".
+        iDestruct (big_sepL_lookup_acc with "Hsl2") as "[Hslot2 Hsl2_rest]"; first exact Hseq.
+        replace (Z.of_nat si) with slot_idx
+          by (subst si; symmetry; apply Z2Nat.id; unfold slot_idx; apply Z.rem_nonneg; lia).
+        iDestruct "Hslot2" as (str) "[Hstr Hcr]".
+        iDestruct "Hcr" as "[H0r|[H1r|[H2r|H3r]]]".
+        ** (* Empty — contradiction, we deposited the write token *)
+           iDestruct "H0r" as "[_ Hwr]". iDestruct "Hwr" as (w2) "Hwr".
+           by iDestruct (pointsto_ne with "Hv Hwr") as %[].
+        ** (* Writing — expected: we deposited the write token at state←1 *)
+           iDestruct "H1r" as "[% Hwk]". subst str.
+           wp_store.
+           iDestruct (own_valid_2 with "Har Hlb_L") as %[_ HpL]%mono_list_both_dfrac_valid_L.
+           assert (Lr !! pos = Some v) as HLr_lookup
+             by (eapply prefix_lookup_Some; [exact Hlookup | exact HpL]).
+           iDestruct ("Hsl2_rest" with "[Hstr Hv Hwk]") as "Hsl2".
+           { iExists 2. iFrame. iRight. iRight. iLeft. iSplit; [done|].
+             iExists v. rewrite Hpos_eq. iFrame. done. }
+           iDestruct ("Hrest2" with "[Hn2 Hb2 Hsl2]") as "Hch2"; first iFrame.
+           iModIntro. iSplitR "HΦ".
+           { iNext. iExists Lr,hr,tr,lvr,hbr,tbr,capr,((fr,fbr)::blocksr'),hir,tir,Cr,Wr. iFrame. done. }
+           wp_pures. iApply "HΦ". iLeft. done.
+        ** (* Valid — contradiction: slot ↦ v' but we hold slot ↦ v *)
+           iDestruct "H2r" as "[_ Hvr]". iDestruct "Hvr" as (v') "(Hvr & _ & _)".
+           by iDestruct (pointsto_ne with "Hv Hvr") as %[].
+        ** (* Claimed — store succeeds, close with Valid *)
+           iDestruct "H3r" as "(% & Hclr2 & Hwkr)". subst str.
+           wp_store.
+           iDestruct (own_valid_2 with "Har Hlb_L") as %[_ HpLr]%mono_list_both_dfrac_valid_L.
+           assert (Lr !! pos = Some v) as HLr_lookup2
+             by (eapply prefix_lookup_Some; [exact Hlookup | exact HpLr]).
+           iDestruct ("Hsl2_rest" with "[Hstr Hv Hwkr]") as "Hsl2".
+           { iExists 2. iFrame. iRight. iRight. iLeft. iSplit; [done|].
+             iExists v. rewrite Hpos_eq. iFrame. done. }
+           iDestruct ("Hrest2" with "[Hn2 Hb2 Hsl2]") as "Hch2"; first iFrame.
+           iModIntro. iSplitR "HΦ".
+           { iNext. iExists Lr,hr,tr,lvr,hbr,tbr,capr,((fr,fbr)::blocksr'),hir,tir,Cr,Wr. iFrame. done. }
+           wp_pures. iApply "HΦ". iLeft. done.
+      + (* Writing — contradiction, we hold write token *)
+        iDestruct "H1" as "[% Hw1]". subst st.
+        iDestruct (ghost_map_elem_ne with "Hwtok Hw1") as %Hneq.
+        exfalso. apply Hneq. lia.
+      + (* Valid — contradiction, we hold write token *)
+        iDestruct "H2" as "[% Hd]". subst st.
+        iDestruct "Hd" as (v2) "(_ & _ & Hw2)".
+        iDestruct (ghost_map_elem_ne with "Hwtok Hw2") as %Hneq.
+        exfalso. apply Hneq. lia.
+      + (* Claimed — contradiction, we hold write token *)
+        iDestruct "H3" as "(% & _ & Hw3)". subst st.
+        iDestruct (ghost_map_elem_ne with "Hwtok Hw3") as %Hneq.
+        exfalso. apply Hneq. lia.
+    - (* Wrong block — follow next pointer *)
+      rewrite bool_decide_eq_false_2; last (intros Hinj; inversion Hinj; lia).
+      wp_pures. wp_bind (! _)%E.
+      iInv "Hinv" as (Ln hn tn lvn hbn tbn capn blocksn hin tin Cn Wn)
+        ">(Han & Hban & Hhn & Htn & Hcln & Hwrn & %Htn & %Hhtn & Hlkn & %Hlvn &
+           Hhbn & Hhln & Htbn & Htln & Hcpn &
+           %Hnen & %Hcen & %Hhin & %Htin & %Hbidsn & %Hcfn & Hchn)".
+      iDestruct (own_valid_2 with "Hban Hlb_blocks") as %[_ Hpfxn]%mono_list_both_dfrac_valid_L.
+      assert (blocksn.*1 !! ci = Some cursor) as Hcin
+        by (eapply prefix_lookup_Some; [exact Hci | exact Hpfxn]).
+      assert (∃ bn, blocksn !! ci = Some (cursor, bn)) as [bn Hblkn].
+      { rewrite list_lookup_fmap in Hcin.
+        destruct (blocksn !! ci) as [[? ?]|]; [simpl in *; simplify_eq; eauto|done]. }
+      assert (bn = Z.of_nat ci) as -> by (apply (Hbidsn _ _ Hblkn)).
+      destruct blocksn as [|[fn fbn] blocksn']; first done.
+      iDestruct (big_sepL_lookup_acc with "Hchn") as "[Hblk Hrest]"; first exact Hblkn.
+      iDestruct "Hblk" as "(Hn & Hb & Hsl)".
+      set (nxt := block_next ((fn,fbn)::blocksn') ci fn). wp_load.
+      assert (∃ ni, ((fn,fbn)::blocksn').*1 !! ni = Some nxt) as [ni Hni].
+      { unfold nxt, block_next.
+        destruct (((fn,fbn)::blocksn') !! S ci) as [[? ?]|] eqn:?;
+          [exists (S ci); rewrite list_lookup_fmap; rewrite Heqo; done | exists 0%nat; done]. }
+      iDestruct (own_mono _ _ (◯ML (((fn,fbn)::blocksn').*1 : list (leibnizO loc))) with "Hban") as "#Hlbn".
+      { apply mono_list_included. }
+      iDestruct ("Hrest" with "[Hn Hb Hsl]") as "Hch"; first iFrame.
+      iModIntro. iSplitR "Hwtok HΦ".
+      { iNext. iExists Ln,hn,tn,lvn,hbn,tbn,capn,((fn,fbn)::blocksn'),hin,tin,Cn,Wn. iFrame. done. }
+      wp_pures.
+      destruct (decide (nxt = start)) as [->|Hns].
+      + rewrite bool_decide_eq_true_2; last done.
+        wp_pures. iApply "HΦ". iRight. iFrame. done.
+      + rewrite bool_decide_eq_false_2; last (intros H; apply Hns; inversion H; done).
+        wp_if_false. iApply ("IH" $! nxt ni ((fn,fbn)::blocksn') Hni with "Hwtok HΦ Hlbn").
+  Defined.
 
   Lemma push_find_block_loop_spec γ (q : loc) (pos : nat) (v : val)
       (L : list val)
       (Hlookup : L !! pos = Some v) :
     {{{ is_queue γ q ∗
-        own γ.(γ_list) (◯ML (L : list (leibnizO val))) }}}
+        own γ.(γ_list) (◯ML (L : list (leibnizO val))) ∗
+        pos ↪[γ.(γ_writes)] () }}}
       chunked_queue_push_find_block_loop #q
         #(Z.quot (Z.of_nat pos) CHUNKED_QUEUE_BLOCK_SIZE)
         #(Z.rem (Z.of_nat pos) CHUNKED_QUEUE_BLOCK_SIZE)
         v
     {{{ RET #(); True }}}.
-  Proof. Admitted.
+  Proof.
+    iIntros (Φ) "(#Hinv & #Hlb & Hwtok) HΦ".
+    unfold chunked_queue_push_find_block_loop.
+    iLöb as "IH" forall (Φ).
+    wp_rec. wp_pures.
+    wp_bind (! _)%E.
+    iInv "Hinv" as (L' h t lock_val hb tb cap blocks hi ti C W')
+      ">(Ha & Hba & Hh & Ht & Hcl & Hwl & %Ht_eq & %Hht & Hlk & %Hlv &
+         Hhb & Hhl & Htb & Htl & Hcap &
+         %Hne & %Hce & %Hhi & %Hti & %Hbids & %Hcfresh & Hch)".
+    wp_load.
+    iDestruct (own_mono _ _ (◯ML (blocks.*1 : list (leibnizO loc))) with "Hba") as "#Hlb_blocks".
+    { apply mono_list_included. }
+    assert (∃ ci, blocks.*1 !! ci = Some tb) as Hcursor_in.
+    { exists ti. rewrite list_lookup_fmap. rewrite Hti. done. }
+    iModIntro. iSplitR "HΦ Hwtok".
+    { iNext. iExists L', h, t, lock_val, hb, tb, cap, blocks, hi, ti, C, W'.
+      iFrame. done. }
+    wp_pures.
+    wp_bind (chunked_queue_push_find_block _ _ _ _ _)%E.
+    wp_apply (push_find_block_inner_spec _ _ _ _ _ _ _ blocks
+      with "[$Hinv $Hlb Hlb_blocks $Hwtok]"); [done|done|iFrame "#"|].
+    iIntros (r) "[%Hsome | [%Hnone Hwtok]]".
+    - subst r. wp_pures. by iApply "HΦ".
+    - subst r. do 5 wp_pure _. iApply ("IH" with "Hwtok HΦ").
+  Defined.
 
   (** @spec: logically atomic push that appends data to L.
       @linpoint: FAA on queue.tail_idx. *)
@@ -442,8 +659,8 @@ Section spec.
     unfold chunked_queue_push. wp_pures.
     (* === FAA linearization point === *)
     wp_bind (FAA _ _).
-    iInv "Hinv" as (L h t lock_val hb tb cap blocks hi ti C)
-      ">(Hauth & Hblk_auth & Hhead & Htail & Hclaims & %Ht & %Hht & Hlock & %Hlock_val &
+    iInv "Hinv" as (L h t lock_val hb tb cap blocks hi ti C W)
+      ">(Hauth & Hblk_auth & Hhead & Htail & Hclaims & Hwrites & %Ht & %Hht & Hlock & %Hlock_val &
          Hhb & Hh & Htb & Htail_loc & Hcap &
          %Hblocks_ne & %Hcap_eq & %Hhi & %Hti & %Hbids & %Hcfresh & Hchain)".
     wp_faa.
@@ -477,11 +694,11 @@ Section spec.
     iSplitR "HΦ".
     { iModIntro. iNext. unfold queue_inv_inner.
       iExists (L ++ [v]), h, (length L + 1)%nat, lock_val, hb, tb,
-        cap, blocks, hi, ti, C.
+        cap, blocks, hi, ti, C, W.
       replace (length L + 1)%Z with (Z.of_nat (length L + 1)%nat) in *
         by lia.
       rewrite app_length. simpl.
-      iFrame "Hauth1 Hblk_auth Hhead Htail Hclaims Hlock Hhb Hh Htb Htail_loc Hcap".
+      iFrame "Hauth1 Hblk_auth Hhead Htail Hclaims Hwrites Hlock Hhb Hh Htb Htail_loc Hcap".
       repeat iSplit; try (iPureIntro; first [done | lia]).
       destruct blocks as [|[first bid] blocks']; first done.
       iApply (big_sepL_mono with "Hchain").
@@ -497,8 +714,8 @@ Section spec.
       - iRight. iLeft. done.
       - iRight. iRight. iLeft.
         iDestruct "H" as "[%Hs2 H]". iSplit; first done.
-        iDestruct "H" as (w0) "[Hval %HLw]".
-        iExists w0. iFrame "Hval".
+        iDestruct "H" as (w0) "(Hval & %HLw & Hw)".
+        iExists w0. iFrame "Hval Hw".
         iPureIntro. apply lookup_app_l_Some. done.
       - iRight. iRight. iRight. done. }
     (* === Continuation: grow + find_block + slot writes === *)
@@ -550,8 +767,8 @@ Section spec.
     wp_rec. wp_pures.
     (* Load cursor.block_id *)
     wp_bind (! _)%E.
-    iInv "Hinv" as (Li hi ti lvi hbi tbi capi blocksi hii tii Ci)
-      ">(Hai & Hbai & Hhi & Hti & Hclaimsi & %Hti_eq & %Hhti & Hlki & %Hlvi &
+    iInv "Hinv" as (Li hi ti lvi hbi tbi capi blocksi hii tii Ci Wi)
+      ">(Hai & Hbai & Hhi & Hti & Hclaimsi & Hwritesi & %Hti_eq & %Hhti & Hlki & %Hlvi &
          Hhbi & Hhli & Htbi & Htli & Hcapi &
          %Hnei & %Hcei & %Hhii & %Htii & %Hbidsi & %Hcfreshi & Hchi)".
     iDestruct (own_valid_2 with "Hbai Hlb_blocks") as %[_ Hpfx]%mono_list_both_dfrac_valid_L.
@@ -566,7 +783,7 @@ Section spec.
     iDestruct "Hblk" as "(Hnext & Hbid & Hslots)". wp_load.
     iDestruct ("Hrest" with "[Hnext Hbid Hslots]") as "Hchi"; first (iFrame).
     iModIntro. iSplitR "Hclaim HΦ".
-    { iNext. iExists Li,hi,ti,lvi,hbi,tbi,capi,((firsti,fbi)::blocksi'),hii,tii,Ci. iFrame. done. }
+    { iNext. iExists Li,hi,ti,lvi,hbi,tbi,capi,((firsti,fbi)::blocksi'),hii,tii,Ci,Wi. iFrame. done. }
     wp_pures.
     destruct (decide (Z.of_nat ci = block_id)) as [Heq|Hne].
     - (* Correct block — enter wait loop *)
@@ -577,8 +794,8 @@ Section spec.
       assert (seq 0 BS !! si = Some si) as Hseq by (apply lookup_seq; lia).
       iLöb as "IH_wait".
       wp_pures. wp_bind (! _)%E.
-      iInv "Hinv" as (Lw hw tw lvw hbw tbw capw blocksw hiw tiw Cw)
-        ">(Haw & Hbaw & Hhw & Htw & Hclaimsw & %Htw & %Hhtw & Hlkw & %Hlvw &
+      iInv "Hinv" as (Lw hw tw lvw hbw tbw capw blocksw hiw tiw Cw Ww)
+        ">(Haw & Hbaw & Hhw & Htw & Hclaimsw & Hwritesw & %Htw & %Hhtw & Hlkw & %Hlvw &
            Hhbw & Hhlw & Htbw & Htlw & Hcapw &
            %Hnew & %Hcew & %Hhiw & %Htiw & %Hbidsw & %Hcfw & Hchw)".
       iDestruct (own_valid_2 with "Hbaw Hlb_blocks") as %[_ Hpfxw]%mono_list_both_dfrac_valid_L.
@@ -604,36 +821,36 @@ Section spec.
         { iExists 0. iFrame. iLeft. iFrame. done. }
         iDestruct ("Hrest" with "[Hn Hb Hsl]") as "Hch"; first iFrame.
         iModIntro. iSplitR "Hclaim HΦ IH_wait".
-        { iNext. iExists Lw,hw,tw,lvw,hbw,tbw,capw,((fw,fbw)::blocksw'),hiw,tiw,Cw. iFrame. done. }
+        { iNext. iExists Lw,hw,tw,lvw,hbw,tbw,capw,((fw,fbw)::blocksw'),hiw,tiw,Cw,Ww. iFrame. done. }
         wp_pures.
         iApply ("IH_wait" with "Hclaim HΦ").
       + (* Writing *)
-        iDestruct "H1" as "%". subst st.
-        iDestruct ("Hsl_rest" with "[Hst]") as "Hsl".
-        { iExists 1. iFrame. iRight. iLeft. done. }
+        iDestruct "H1" as "[% Hw1]". subst st.
+        iDestruct ("Hsl_rest" with "[Hst Hw1]") as "Hsl".
+        { iExists 1. iFrame. iRight. iLeft. iFrame. done. }
         iDestruct ("Hrest" with "[Hn Hb Hsl]") as "Hch"; first iFrame.
         iModIntro. iSplitR "Hclaim HΦ IH_wait".
-        { iNext. iExists Lw,hw,tw,lvw,hbw,tbw,capw,((fw,fbw)::blocksw'),hiw,tiw,Cw. iFrame. done. }
+        { iNext. iExists Lw,hw,tw,lvw,hbw,tbw,capw,((fw,fbw)::blocksw'),hiw,tiw,Cw,Ww. iFrame. done. }
         wp_pures.
         iApply ("IH_wait" with "Hclaim HΦ").
       + (* Valid with data *)
         iDestruct "H2" as "[% Hd]". subst st.
-        iDestruct "Hd" as (v) "[Hv %HLv]".
+        iDestruct "Hd" as (v) "(Hv & %HLv & Hw2)".
         iDestruct (own_valid_2 with "Haw Hlb_L") as %[_ HpL]%mono_list_both_dfrac_valid_L.
         assert (v = d) as ->.
         { assert (Lw !! h1 = Some d) by (eapply prefix_lookup_Some; [exact Hlookup | exact HpL]).
           rewrite Hpos_eq in HLv. congruence. }
         (* Deposit claim, keep value *)
-        iDestruct ("Hsl_rest" with "[Hst Hclaim]") as "Hsl".
+        iDestruct ("Hsl_rest" with "[Hst Hclaim Hw2]") as "Hsl".
         { iExists 2. iFrame. iRight. iRight. iRight. iSplit; [done|]. rewrite Hpos_eq. iFrame. }
         iDestruct ("Hrest" with "[Hn Hb Hsl]") as "Hch"; first iFrame.
         iModIntro. iSplitR "Hv HΦ".
-        { iNext. iExists Lw,hw,tw,lvw,hbw,tbw,capw,((fw,fbw)::blocksw'),hiw,tiw,Cw. iFrame. done. }
+        { iNext. iExists Lw,hw,tw,lvw,hbw,tbw,capw,((fw,fbw)::blocksw'),hiw,tiw,Cw,Ww. iFrame. done. }
         wp_pures. wp_load. wp_pures.
         (* Store state ← 0 *)
         wp_bind (_ <- _)%E.
-        iInv "Hinv" as (Lr hr tr lvr hbr tbr capr blocksr hir tir Cr)
-          ">(Har & Hbar & Hhr & Htr & Hclr & %Htr & %Hhtr & Hlkr & %Hlvr &
+        iInv "Hinv" as (Lr hr tr lvr hbr tbr capr blocksr hir tir Cr Wr)
+          ">(Har & Hbar & Hhr & Htr & Hclr & Hwrr & %Htr & %Hhtr & Hlkr & %Hlvr &
              Hhbr & Hhlr & Htbr & Htlr & Hcpr &
              %Hner & %Hcer & %Hhir & %Htir & %Hbidsr & %Hcfr & Hchr)".
         iDestruct (own_valid_2 with "Hbar Hlb_blocks") as %[_ Hpfxr]%mono_list_both_dfrac_valid_L.
@@ -653,31 +870,31 @@ Section spec.
         iDestruct "Hcr" as "[H0r|[H1r|[H2r|H3r]]]".
         ** iDestruct "H0r" as "[_ Hwr]". iDestruct "Hwr" as (w) "Hwr".
            by iDestruct (pointsto_ne with "Hv Hwr") as %[].
-        ** iDestruct "H1r" as "%". subst str. wp_store.
-           iDestruct ("Hsl2_rest" with "[Hstr Hv]") as "Hsl2".
+        ** iDestruct "H1r" as "[% Hwr1]". subst str. wp_store.
+           iDestruct ("Hsl2_rest" with "[Hstr Hv Hwr1]") as "Hsl2".
            { iExists 0. iFrame. iLeft. iSplit; [done|]. iExists d. iFrame. }
            iDestruct ("Hrest2" with "[Hn2 Hb2 Hsl2]") as "Hch2"; first iFrame.
            iModIntro. iSplitR "HΦ".
-           { iNext. iExists Lr,hr,tr,lvr,hbr,tbr,capr,((fr,fbr)::blocksr'),hir,tir,Cr. iFrame. done. }
+           { iNext. iExists Lr,hr,tr,lvr,hbr,tbr,capr,((fr,fbr)::blocksr'),hir,tir,Cr,Wr. iFrame. done. }
            wp_pures. iApply "HΦ". iLeft. done.
-        ** iDestruct "H2r" as "[_ Hvr]". iDestruct "Hvr" as (v') "[Hvr _]".
+        ** iDestruct "H2r" as "[_ Hvr]". iDestruct "Hvr" as (v') "(Hvr & _ & _)".
            by iDestruct (pointsto_ne with "Hv Hvr") as %[].
-        ** iDestruct "H3r" as "[% Hclr2]". subst str. wp_store.
+        ** iDestruct "H3r" as "(% & Hclr2 & _)". subst str. wp_store.
            iDestruct ("Hsl2_rest" with "[Hstr Hv]") as "Hsl2".
            { iExists 0. iFrame. iLeft. iSplit; [done|]. iExists d. iFrame. }
            iDestruct ("Hrest2" with "[Hn2 Hb2 Hsl2]") as "Hch2"; first iFrame.
            iModIntro. iSplitR "HΦ".
-           { iNext. iExists Lr,hr,tr,lvr,hbr,tbr,capr,((fr,fbr)::blocksr'),hir,tir,Cr. iFrame. done. }
+           { iNext. iExists Lr,hr,tr,lvr,hbr,tbr,capr,((fr,fbr)::blocksr'),hir,tir,Cr,Wr. iFrame. done. }
            wp_pures. iApply "HΦ". iLeft. done.
       + (* Claimed — contradiction, we hold the claim *)
-        iDestruct "H3" as "[% Hcl2]". subst st.
+        iDestruct "H3" as "(% & Hcl2 & _)". subst st.
         iDestruct (ghost_map_elem_ne with "Hclaim Hcl2") as %Hneq.
         exfalso. apply Hneq. lia.
     - (* Wrong block — follow next pointer *)
       rewrite bool_decide_eq_false_2; last (intros Hinj; inversion Hinj; lia).
       wp_pures. wp_bind (! _)%E.
-      iInv "Hinv" as (Ln hn tn lvn hbn tbn capn blocksn hin tin Cn)
-        ">(Han & Hban & Hhn & Htn & Hcln & %Htn & %Hhtn & Hlkn & %Hlvn &
+      iInv "Hinv" as (Ln hn tn lvn hbn tbn capn blocksn hin tin Cn Wn)
+        ">(Han & Hban & Hhn & Htn & Hcln & Hwrn & %Htn & %Hhtn & Hlkn & %Hlvn &
            Hhbn & Hhln & Htbn & Htln & Hcpn &
            %Hnen & %Hcen & %Hhin & %Htin & %Hbidsn & %Hcfn & Hchn)".
       iDestruct (own_valid_2 with "Hban Hlb_blocks") as %[_ Hpfxn]%mono_list_both_dfrac_valid_L.
@@ -699,7 +916,7 @@ Section spec.
       { apply mono_list_included. }
       iDestruct ("Hrest" with "[Hn Hb Hsl]") as "Hch"; first iFrame.
       iModIntro. iSplitR "Hclaim HΦ".
-      { iNext. iExists Ln,hn,tn,lvn,hbn,tbn,capn,((fn,fbn)::blocksn'),hin,tin,Cn. iFrame. done. }
+      { iNext. iExists Ln,hn,tn,lvn,hbn,tbn,capn,((fn,fbn)::blocksn'),hin,tin,Cn,Wn. iFrame. done. }
       wp_pures.
       destruct (decide (nxt = start)) as [->|Hns].
       + rewrite bool_decide_eq_true_2; last done.
@@ -725,38 +942,29 @@ Section spec.
   Proof.
     iIntros (Φ) "(#Hinv & #Hlb_L & #Hlb_blocks & Hclaim) HΦ".
     unfold chunked_queue_pop_find_slot_loop.
-    iLöb as "IH".
+    iLöb as "IH" forall (Φ).
     wp_rec. wp_pures.
-    (* Load cursor = !(queue +ₗ 1) = head_block *)
     wp_bind (! _)%E.
-    iInv "Hinv" as (Lf hf tf lvf hbf tbf capf blocksf hif tif Cf)
-      ">(Haf & Hbaf & Hhf & Htf & Hclaimsf & %Htf_eq & %Hhtf & Hlkf & %Hlvf &
+    iInv "Hinv" as (Lf hf tf lvf hbf tbf capf blocksf hif tif Cf Wf)
+      ">(Haf & Hbaf & Hhf & Htf & Hclaimsf & Hwritesf & %Htf_eq & %Hhtf & Hlkf & %Hlvf &
          Hhbf & Hhfl & Htbf & Htfl & Hcapf &
          %Hnef & %Hcef & %Hhif & %Htif & %Hbidsf & %Hcfreshf & Hchf)".
     wp_load.
-    (* Save persistent fragment for current blocks *)
     iDestruct (own_mono _ _ (◯ML (blocksf.*1 : list (leibnizO loc))) with "Hbaf") as "#Hlb_blocksf".
     { apply mono_list_included. }
     iModIntro. iSplitR "HΦ Hclaim".
-    { iNext. unfold queue_inv_inner.
-      iExists Lf, hf, tf, lvf, hbf, tbf, capf, blocksf, hif, tif, Cf.
+    { iNext. iExists Lf, hf, tf, lvf, hbf, tbf, capf, blocksf, hif, tif, Cf, Wf.
       iFrame. done. }
     wp_pures.
-    (* Now call find_slot on the chain starting from hbf.
-       The inner find_slot walks the chain and eventually finds the block
-       with block_id = h1 / BS. We need to know hbf is in the chain.
-       From Hhif: blocksf !! hif = Some (hbf, hif). *)
-    (* We know hbf is at index hif in blocksf, and we have ◯ML blocksf.*1.
-       The target block_id = h1 quot BS. We need the block at that index
-       to exist in the chain. *)
-    set (block_id := Z.quot (Z.of_nat h1) CHUNKED_QUEUE_BLOCK_SIZE).
-    set (slot_idx := Z.rem (Z.of_nat h1) CHUNKED_QUEUE_BLOCK_SIZE).
-    (* The inner find_slot either finds the block and returns SOME d
-       (consuming the claim), or returns NONE (preserving the claim).
-       Proof of the inner call is admitted here. *)
     wp_bind (chunked_queue_pop_find_slot _ _ _ _)%E.
-    admit.
-  Admitted.
+    assert (∃ ci, blocksf.*1 !! ci = Some hbf) as Hcursor_in.
+    { exists hif. rewrite list_lookup_fmap. rewrite Hhif. done. }
+    wp_apply (pop_find_slot_inner_spec _ _ _ _ _ _ blocksf
+      with "[$Hinv $Hlb_L Hlb_blocksf $Hclaim]"); [done|done|iFrame "#"|].
+    iIntros (r) "[%Hsome | [%Hnone Hclaim]]".
+    - subst r. wp_pures. by iApply "HΦ".
+    - subst r. do 5 wp_pure _. iApply ("IH" with "Hclaim HΦ").
+  Defined.
 
   (** @spec: logically atomic pop that removes head from L.
       @linpoint: CAS on queue.head_idx. *)
@@ -781,21 +989,21 @@ Section spec.
     wp_rec. wp_pures.
     (* Load head_idx *)
     wp_bind (! _)%E.
-    iInv "Hinv" as (L1 h1 t1 lv1 hb1 tb1 cap1 blocks1 hi1 ti1 C1)
-      ">(Ha1 & Hba1 & Hh1 & Ht1 & Hclaims1 & %Ht1 & %Hht1 & Hlk1 & %Hlv1 &
+    iInv "Hinv" as (L1 h1 t1 lv1 hb1 tb1 cap1 blocks1 hi1 ti1 C1 W1)
+      ">(Ha1 & Hba1 & Hh1 & Ht1 & Hclaims1 & Hwrites1 & %Ht1 & %Hht1 & Hlk1 & %Hlv1 &
          Hhb1 & Hh1l & Htb1 & Htl1 & Hcap1 &
          %Hne1 & %Hce1 & %Hhi1 & %Hti1 & %Hbids1 & %Hcfresh1 & Hch1)".
     wp_load.
     iDestruct (mono_nat_lb_own_get with "Hh1") as "#Hlb_h1".
     iModIntro. iSplitR "AU".
     { iNext. unfold queue_inv_inner.
-      iExists L1, h1, t1, lv1, hb1, tb1, cap1, blocks1, hi1, ti1, C1.
+      iExists L1, h1, t1, lv1, hb1, tb1, cap1, blocks1, hi1, ti1, C1, W1.
       iFrame. done. }
     wp_pures.
     (* Load tail_idx *)
     wp_bind (! _)%E.
-    iInv "Hinv" as (L2 h2 t2 lv2 hb2 tb2 cap2 blocks2 hi2 ti2 C2)
-      ">(Ha2 & Hba2 & Hh2 & Ht2 & Hclaims2 & %Ht2 & %Hht2 & Hlk2 & %Hlv2 &
+    iInv "Hinv" as (L2 h2 t2 lv2 hb2 tb2 cap2 blocks2 hi2 ti2 C2 W2)
+      ">(Ha2 & Hba2 & Hh2 & Ht2 & Hclaims2 & Hwrites2 & %Ht2 & %Hht2 & Hlk2 & %Hlv2 &
          Hhb2 & Hh2l & Htb2 & Htl2 & Hcap2 &
          %Hne2 & %Hce2 & %Hhi2 & %Hti2 & %Hbids2 & %Hcfresh2 & Hch2)".
     wp_load.
@@ -821,7 +1029,7 @@ Section spec.
         - unfold queue_content. iFrame. }
       iModIntro. iSplitR "HΦ".
       { iNext. unfold queue_inv_inner.
-        iExists L2, h1, h1, lv2, hb2, tb2, cap2, blocks2, hi2, ti2, C2.
+        iExists L2, h1, h1, lv2, hb2, tb2, cap2, blocks2, hi2, ti2, C2, W2.
         iFrame. done. }
       wp_pures.
       rewrite bool_decide_eq_true_2; last lia.
@@ -829,15 +1037,15 @@ Section spec.
     + (* Non-empty case: h1 < t2 *)
       iModIntro. iSplitR "AU".
       { iNext. unfold queue_inv_inner.
-        iExists L2, h2, t2, lv2, hb2, tb2, cap2, blocks2, hi2, ti2, C2.
+        iExists L2, h2, t2, lv2, hb2, tb2, cap2, blocks2, hi2, ti2, C2, W2.
         iFrame. done. }
       wp_pures.
       rewrite bool_decide_eq_false_2; last lia.
       wp_pures.
       (* CAS on head_idx *)
       wp_bind (CmpXchg _ _ _).
-      iInv "Hinv" as (L3 h3 t3 lv3 hb3 tb3 cap3 blocks3 hi3 ti3 C3)
-        ">(Ha3 & Hba3 & Hh3 & Ht3 & Hclaims3 & %Ht3 & %Hht3 & Hlk3 & %Hlv3 &
+      iInv "Hinv" as (L3 h3 t3 lv3 hb3 tb3 cap3 blocks3 hi3 ti3 C3 W3)
+        ">(Ha3 & Hba3 & Hh3 & Ht3 & Hclaims3 & Hwrites3 & %Ht3 & %Hht3 & Hlk3 & %Hlv3 &
            Hhb3 & Hh3l & Htb3 & Htl3 & Hcap3 &
            %Hne3 & %Hce3 & %Hhi3 & %Hti3 & %Hbids3 & %Hcfresh3 & Hch3)".
       destruct (decide (h3 = h1)) as [->|Hne].
@@ -875,7 +1083,7 @@ Section spec.
         replace (h1 + 1)%Z with (Z.of_nat (S h1)) by lia.
         iModIntro. iSplitR "HΦ Hclaim".
         { iNext. unfold queue_inv_inner.
-          iExists L3, (S h1), t3, lv3, hb3, tb3, cap3, blocks3, hi3, ti3, (<[h1 := ()]> C3).
+          iExists L3, (S h1), t3, lv3, hb3, tb3, cap3, blocks3, hi3, ti3, (<[h1 := ()]> C3), W3.
           iFrame. iPureIntro. repeat split; try done; try lia.
           intros k Hk. rewrite lookup_insert_ne; [apply Hcfresh3; lia | lia]. }
         wp_pures.
@@ -893,8 +1101,8 @@ Section spec.
                wp_rec. wp_pures.
                (* Load old_head = queue.head_block *)
                wp_bind (! _)%E.
-               iInv "Hinv" as (La ha ta lva hba tba capa blocksa hia tia Ca)
-                 ">(Haa & Hbaa & Hha & Hta & Hclaimsa & %Hta_eq & %Hhta & Hlka & %Hlva &
+               iInv "Hinv" as (La ha ta lva hba tba capa blocksa hia tia Ca Wa)
+                 ">(Haa & Hbaa & Hha & Hta & Hclaimsa & Hwritesa & %Hta_eq & %Hhta & Hlka & %Hlva &
                     Hhba & Hhla & Htba & Htla & Hcapa &
                     %Hnea & %Hcea & %Hhia & %Htia & %Hbidsa & %Hcfresha & Hcha)".
                wp_load.
@@ -903,13 +1111,13 @@ Section spec.
                { apply mono_list_included. }
                iModIntro. iSplitR "IH_adv HΦ Hclaim".
                { iNext. unfold queue_inv_inner.
-                 iExists La, ha, ta, lva, hba, tba, capa, blocksa, hia, tia, Ca.
+                 iExists La, ha, ta, lva, hba, tba, capa, blocksa, hia, tia, Ca, Wa.
                  iFrame. done. }
                wp_pures.
                (* Now need to read hba.block_id — open invariant again *)
                wp_bind (! _)%E.
-               iInv "Hinv" as (Lb hb0 tb0 lvb hbb tbb capb blocksb hib tib Cb)
-                 ">(Hab & Hbab & Hhb & Htb & Hclaimsb & %Htb_eq & %Hhtb & Hlkb & %Hlvb &
+               iInv "Hinv" as (Lb hb0 tb0 lvb hbb tbb capb blocksb hib tib Cb Wb)
+                 ">(Hab & Hbab & Hhb & Htb & Hclaimsb & Hwritesb & %Htb_eq & %Hhtb & Hlkb & %Hlvb &
                     Hhbb & Hhlb & Htbb & Htlb & Hcapb &
                     %Hneb & %Hceb & %Hhib & %Htib & %Hbidsb & %Hcfreshb & Hchb)".
                (* Prove hba is in current blocks via prefix *)
@@ -937,7 +1145,7 @@ Section spec.
                { unfold is_block. iFrame. }
                iModIntro. iSplitR "IH_adv HΦ Hclaim".
                { iNext. unfold queue_inv_inner.
-                 iExists Lb, hb0, tb0, lvb, hbb, tbb, capb, ((firstb, firstbid) :: blocksb'), hib, tib, Cb.
+                 iExists Lb, hb0, tb0, lvb, hbb, tbb, capb, ((firstb, firstbid) :: blocksb'), hib, tib, Cb, Wb.
                  iFrame. done. }
                wp_pures.
                (* block_id ≤ hia? *)
@@ -952,8 +1160,8 @@ Section spec.
                    wp_pures.
                    (* Read next pointer from hba *)
                    wp_bind (! _)%E.
-                   iInv "Hinv" as (Lc hc tc lvc hbc tbc capc blocksc hic tic Cc)
-                     ">(Hac & Hbac & Hhc & Htc & Hclaimsc & %Htc_eq & %Hhtc & Hlkc & %Hlvc &
+                   iInv "Hinv" as (Lc hc tc lvc hbc tbc capc blocksc hic tic Cc Wc)
+                     ">(Hac & Hbac & Hhc & Htc & Hclaimsc & Hwritesc & %Htc_eq & %Hhtc & Hlkc & %Hlvc &
                         Hhbc & Hhlc & Htbc & Htlc & Hcapc &
                         %Hnec & %Hcec & %Hhic & %Htic & %Hbidsc & %Hcfreshc & Hchc)".
                    iDestruct (own_valid_2 with "Hbac Hlb_blocksa") as %Hpfx_ac.
@@ -980,13 +1188,13 @@ Section spec.
                    { unfold is_block. iFrame. }
                    iModIntro. iSplitR "IH_adv HΦ Hclaim".
                    { iNext. unfold queue_inv_inner.
-                     iExists Lc, hc, tc, lvc, hbc, tbc, capc, ((firstc, firstcidb) :: blocksc'), hic, tic, Cc.
+                     iExists Lc, hc, tc, lvc, hbc, tbc, capc, ((firstc, firstcidb) :: blocksc'), hic, tic, Cc, Wc.
                      iFrame. done. }
                    wp_pures.
                    (* CAS on queue.head_block *)
                    wp_bind (CmpXchg _ _ _).
-                   iInv "Hinv" as (Ld hd td lvd hbd tbd capd blocksd hid tid Cd)
-                     ">(Had & Hbad & Hhd & Htd & Hclaimsd & %Htd_eq & %Hhtd & Hlkd & %Hlvd &
+                   iInv "Hinv" as (Ld hd td lvd hbd tbd capd blocksd hid tid Cd Wd)
+                     ">(Had & Hbad & Hhd & Htd & Hclaimsd & Hwritesd & %Htd_eq & %Hhtd & Hlkd & %Hlvd &
                         Hhbd & Hhld & Htbd & Htld & Hcapd &
                         %Hned & %Hced & %Hhid & %Htid & %Hbidsd & %Hcfreshd & Hchd)".
                    destruct (decide (hbd = hba)) as [->|Hne_hbd].
@@ -1014,7 +1222,7 @@ Section spec.
                          rewrite Hbn.
                          iModIntro. iSplitR "IH_adv HΦ Hclaim".
                          { iNext. unfold queue_inv_inner.
-                           iExists Ld, hd, td, lvd, next_loc, tbd, capd, blocksd, (S hia), tid, Cd.
+                           iExists Ld, hd, td, lvd, next_loc, tbd, capd, blocksd, (S hia), tid, Cd, Wd.
                            iFrame. iPureIntro. repeat split; try done; try lia. }
                          wp_proj. wp_seq.
                          iApply ("IH_adv" with "HΦ Hclaim").
@@ -1032,7 +1240,7 @@ Section spec.
                          rewrite Hbn.
                          iModIntro. iSplitR "IH_adv HΦ Hclaim".
                          { iNext. unfold queue_inv_inner.
-                           iExists Ld, hd, td, lvd, firstc, tbd, capd, blocksd, 0%nat, tid, Cd.
+                           iExists Ld, hd, td, lvd, firstc, tbd, capd, blocksd, 0%nat, tid, Cd, Wd.
                            iFrame. iPureIntro. repeat split; try done; try lia. }
                          wp_proj. wp_seq.
                          iApply ("IH_adv" with "HΦ Hclaim").
@@ -1040,7 +1248,7 @@ Section spec.
                        wp_cmpxchg_fail.
                        iModIntro. iSplitR "IH_adv HΦ Hclaim".
                        { iNext. unfold queue_inv_inner.
-                         iExists Ld, hd, td, lvd, hbd, tbd, capd, blocksd, hid, tid, Cd.
+                         iExists Ld, hd, td, lvd, hbd, tbd, capd, blocksd, hid, tid, Cd, Wd.
                          iFrame. done. }
                        wp_proj. wp_seq.
                        iApply ("IH_adv" with "HΦ Hclaim").
@@ -1058,7 +1266,7 @@ Section spec.
         wp_cmpxchg_fail. { intros H. inversion H. lia. }
         iModIntro. iSplitR "AU".
         { iNext. unfold queue_inv_inner.
-          iExists L3, h3, t3, lv3, hb3, tb3, cap3, blocks3, hi3, ti3, C3.
+          iExists L3, h3, t3, lv3, hb3, tb3, cap3, blocks3, hi3, ti3, C3, W3.
           iFrame. done. }
         wp_proj. wp_if. iApply ("IH" with "AU").
   Defined.
