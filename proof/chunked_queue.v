@@ -534,8 +534,14 @@ Section spec.
       iDestruct (big_sepL_lookup_acc with "Hch4") as "[Hblk4 Hrest4]"; first exact Htail_blk4.
       iDestruct "Hblk4" as "(Hn4 & Hbid4 & Hsl4)".
       wp_store.
-      (* Update blocks list: append new_block *)
-      (* TODO: update mono_list, reconstruct block chain with new block *)
+      (* We need: tail is the last block (ti0 = length blocks4 - 1).
+         This holds because the lock prevents concurrent growers,
+         and the block_id invariant ensures blocks are contiguous. *)
+      (* For now, admit the remaining invariant update *)
+      (* TODO: prove ti0 = length blocks4 - 1, extend mono_list,
+         build slot_inv for new block from Hnew_slots,
+         reconstruct is_block_chain with the new block appended,
+         close invariant, update capacity, recurse *)
       admit.
     - (* No growth needed, return tail *)
       rewrite bool_decide_eq_false_2; last lia.
