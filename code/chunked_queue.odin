@@ -47,6 +47,7 @@ Chunked_Queue_Slot :: struct($T: typeid) {
 Chunked_Queue_Block :: struct($T: typeid) {
 	next: ^Chunked_Queue_Block(T),
 	block_id: u64,
+	empty_count: int,
 	data: [CHUNKED_QUEUE_BLOCK_SIZE]Chunked_Queue_Slot(T),
 }
 
@@ -94,8 +95,8 @@ chunked_queue_push :: proc(queue: ^Chunked_Queue($T), data: T) {
 		tail := sync.atomic_load_explicit(&queue.tail_block, .Relaxed)
 		for tail.block_id < block_id {
 			next := tail.next
-			head := sync.atomic_load_explicit(&queue.head_block, .Acquire)
-			if next.block_id != head.block_id {
+			if sync.atomic_load_explicit(&next.empty_count, .Acquire) == CHUNKED_QUEUE_BLOCK_SIZE {
+				sync.atomic_store_explicit(&next.empty_count, 0, .Release)
 				next.block_id = tail.block_id + 1
 				tail = next
 			} else {
@@ -175,6 +176,7 @@ chunked_queue_pop :: proc(queue: ^Chunked_Queue($T)) -> (data: T, poped: bool) {
 				}
 				data = slot.value
 				sync.atomic_store_explicit(&slot.state, .Empty, .Release)
+				sync.atomic_add_explicit(&cursor.empty_count, 1, .Release)
 				return data, true
 			}
 			cursor = cursor.next
