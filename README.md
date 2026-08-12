@@ -43,22 +43,36 @@ This experiment was realized in four steps:
    Some additional prompting was done to break complex lemmas into sub-proofs to
    reduce context explosion and facilitate the proving process.
 
+Because of a logic issue that wasn't found through the proof due to a missing
+specification, an extra-step was used to fix the code and update the proof.
+
 ### The results
 
 #### Implementation
 
-Unsurprisingly, the AI was able to produce the correct implementation on its
-first try. This algorithm is close to existing implementation such as the
-unbounded concurrent queue from `One-TBB` (our version is much simpler, but
-the slot system is similar). The agent properly used explicit atomic operations
-(will optimize the code for some platforms) and the final code is readable and
-functional.
+The first version of the code that has been proved presented a logic issue that
+was only found later (not through the proof, indicating a hole in the
+specifications). The bug was located in the grow logic: in the original
+version, block reuse (circular linked list) wasn't implemented, and the push
+function was always reallocating new blocks instead of reusing the empty ones
+behind the head. Correcting this issue required updating both the code and the
+specifications to maintain the correctness of the proof. Note that this logic
+issue was not a race bug, and both the push and pop functions were working
+(which was proved). However, the block reuse speciation was not written which
+explains why this issue wasn't detected when writing the proof. Not being
+careful enough when reading the AI output and not writing all the
+specifications properly was a mistake. However, this mistake is a good
+demonstration that the proving process only demonstrates the program
+correctness with respect to the specifications, and it is possible to
+successfully prove a wrong program. Note as well that this error had no impact
+on the slot ownership bug introduced on purpose to make sure that AI was able
+to find bugs through the proof.
 
 For the test part, the agent was simply told to write a test that verifies all
 the queues operations. Surprisingly, the AI only wrote a sequential test which
 was not able to detect the bug introduced later.
 
-##### The bug
+##### The introduced bug
 
 The bug was introduced where the data is written in the push function.
 
@@ -145,6 +159,10 @@ A more experience Coq and Iris user may know how to break the specifications or
 rewrite them in a way that makes the proving process easier and faster. A skill
 file presenting advanced patterns could also improve the agent performance
 during this phase.
+
+## Solving the reuse bug
+
+TODO
 
 ## Conclusion
 
