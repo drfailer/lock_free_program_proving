@@ -628,9 +628,74 @@ Section spec.
 
       (* Branch: ec = BS? *)
       destruct (decide (ecb = CHUNKED_QUEUE_BLOCK_SIZE)%Z) as [Hec_full|Hec_not_full].
-      + (* ec = BS → reuse branch (deferred) *)
+      + (* ec = BS → reuse branch *)
         rewrite bool_decide_eq_true_2; last (subst ecb; done).
         wp_pures.
+
+        (* Store 1: next +ₗ 2 <- 0 — reset empty_count *)
+        wp_bind (_ <- _)%E.
+        iInv "Hinv" as (Lc hc tc lvc hbc tbc capc blocksc hic tic Cc Wc)
+          ">(Hac & Hbac & Hhc & Htc & Hclc & Hwrc & %Htc_eq & %Hhtc & Hlkc & %Hlvc &
+             Hhbc & Hhlc & Htbc & Htlc & Hcapc &
+             %Hnec & %Hhic & %Htb_inc & %Htic & %Htilastc & %Hbidsc & %Hcfreshc & %Hwfreshc & Hgvlkc & Hgvc & Hchc)".
+        iDestruct (own_valid_2 with "Hbac Hlba") as %[_ Hpfxc]%mono_list_both_dfrac_valid_L.
+        assert (blocksc.*1 !! 0 = Some firsta) as Hfirst_fmapc.
+        { eapply prefix_lookup_Some; [|exact Hpfxc]. done. }
+        assert (∃ fbc, blocksc !! 0 = Some (firsta, fbc)) as [fbc Hfirst_blkc].
+        { rewrite list_lookup_fmap in Hfirst_fmapc.
+          destruct (blocksc !! 0) as [[? z]|] eqn:Heq; [|done].
+          simpl in Hfirst_fmapc. injection Hfirst_fmapc as ->. eauto. }
+        assert (fbc = Z.of_nat 0) as -> by (apply (Hbidsc _ _ Hfirst_blkc)).
+        destruct blocksc as [|[firstc fbc'] blocksc']; first done.
+        simpl in Hfirst_blkc. injection Hfirst_blkc as -> ->.
+        iDestruct (big_sepL_lookup_acc with "Hchc") as "[Hblkc Hrestc]";
+          first by apply lookup_cons_Some; left.
+        iDestruct "Hblkc" as (ecc) "(Hnc & Hbidc & Hecc & Hslc)".
+        wp_store.
+        iDestruct ("Hrestc" with "[Hnc Hbidc Hecc Hslc]") as "Hchc".
+        { iExists 0. iFrame "Hnc Hbidc Hecc Hslc". }
+        iModIntro. iSplitR "HΦ Hgvtok".
+        { iNext. iExists Lc,hc,tc,lvc,hbc,tbc,capc,((firsta,0%Z)::blocksc'),hic,tic,Cc,Wc. iFrame. done. }
+        wp_pures.
+
+        (* Load: !(tail +ₗ 1) — read tail's block_id *)
+        wp_bind (! _)%E.
+        iInv "Hinv" as (Ld hd td lvd hbd tbd capd blocksd hid tid Cd Wd)
+          ">(Had & Hbad & Hhd & Htd & Hcld & Hwrd & %Htd_eq & %Hhtd & Hlkd & %Hlvd &
+             Hhbd & Hhld & Htbd & Htld & Hcapd &
+             %Hned & %Hhid & %Htb_ind & %Htid & %Htilastd & %Hbidsd & %Hcfreshd & %Hwfreshd & Hgvlkd & Hgvd & Hchd)".
+        iDestruct (own_valid_2 with "Hbad Hlb1") as %[_ Hpfxd]%mono_list_both_dfrac_valid_L.
+        assert (blocksd.*1 !! ti0 = Some tail) as Htail_fmapd.
+        { eapply prefix_lookup_Some; [|exact Hpfxd].
+          rewrite list_lookup_fmap. simpl.
+          rewrite (list_lookup_fmap fst ((first1,fb1)::blocks1') ti0) in Htail_in1.
+          exact Htail_in1. }
+        assert (blocksd !! ti0 = Some (tail, Z.of_nat ti0)) as Htail_blkd.
+        { rewrite list_lookup_fmap in Htail_fmapd.
+          destruct (blocksd !! ti0) as [[? z]|] eqn:Heq; [|done].
+          simpl in Htail_fmapd. injection Htail_fmapd as ->.
+          assert (z = Z.of_nat ti0) as -> by (apply (Hbidsd _ _ Heq)). done. }
+        destruct blocksd as [|[firstd fbd] blocksd']; first done.
+        iDestruct (big_sepL_lookup_acc with "Hchd") as "[Hblkd Hrestd]"; first exact Htail_blkd.
+        iDestruct "Hblkd" as (ecd) "(Hnd & Hbidd & Hecd & Hsld)".
+        wp_load.
+        iDestruct ("Hrestd" with "[Hnd Hbidd Hecd Hsld]") as "Hchd"; first (iExists ecd; iFrame).
+        iModIntro. iSplitR "HΦ Hgvtok".
+        { iNext. iExists Ld,hd,td,lvd,hbd,tbd,capd,((firstd,fbd)::blocksd'),hid,tid,Cd,Wd. iFrame. done. }
+        wp_pures.
+
+        (* Store 2: next +ₗ 1 <- ti0 + 1 — set new block_id *)
+        (* BLOCKED: After this store, firsta's physical bid = S ti0 but
+           is_block expects bid = 0 (from blocks list entry at index 0).
+           To close the invariant we need:
+           1. A blocks list where firsta has bid = S ti0
+              (either modify in place or append + skip old entry)
+           2. Proof that all slot_invs can be reindexed from position
+              0*BS+i to (S ti0)*BS+i — requires proving all slots are
+              Empty (position-independent), which needs ec ↔ slot state
+              connection in the invariant
+           3. Relaxation of Hbids (∀ i blk, blocks !! i → snd blk = Z.of_nat i)
+              since reused block at index 0 would have bid ≠ 0 *)
         admit.
 
       + (* ec ≠ BS → allocate branch *)
