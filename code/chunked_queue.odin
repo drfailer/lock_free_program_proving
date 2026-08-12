@@ -93,12 +93,19 @@ chunked_queue_push :: proc(queue: ^Chunked_Queue($T), data: T) {
 		sync.mutex_lock(&queue.grow_mutex)
 		tail := sync.atomic_load_explicit(&queue.tail_block, .Relaxed)
 		for tail.block_id < block_id {
-			new_block, _ := new(Chunked_Queue_Block(T))
-			new_block.block_id = tail.block_id + 1
-			new_block.next = tail.next
-			sync.atomic_store_explicit(&tail.next, new_block, .Release)
-			tail = new_block
-			queue.capacity += CHUNKED_QUEUE_BLOCK_SIZE
+			next := tail.next
+			head := sync.atomic_load_explicit(&queue.head_block, .Acquire)
+			if next.block_id != head.block_id {
+				next.block_id = tail.block_id + 1
+				tail = next
+			} else {
+				new_block, _ := new(Chunked_Queue_Block(T))
+				new_block.block_id = tail.block_id + 1
+				new_block.next = tail.next
+				sync.atomic_store_explicit(&tail.next, new_block, .Release)
+				tail = new_block
+				queue.capacity += CHUNKED_QUEUE_BLOCK_SIZE
+			}
 		}
 		sync.atomic_store_explicit(&queue.tail_block, tail, .Release)
 		sync.mutex_unlock(&queue.grow_mutex)
