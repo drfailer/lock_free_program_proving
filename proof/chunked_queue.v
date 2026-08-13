@@ -120,6 +120,7 @@ Definition chunked_queue_pop_find_slot : val :=
         else "wait" #()) #();;
       let: "data" := !"slot" in
       "slot" +ₗ #1 <- #0;;
+      FAA ("cursor" +ₗ #2) #1;;
       SOME "data"
     else
       let: "next" := !("cursor" +ₗ #0) in
@@ -251,6 +252,7 @@ Section spec.
     (b +ₗ 0) ↦ #next ∗
     (b +ₗ 1) ↦ #bid ∗
     (b +ₗ 2) ↦ #ec ∗
+    ⌜(0 ≤ ec)%Z ∧ (ec ≤ CHUNKED_QUEUE_BLOCK_SIZE)%Z⌝ ∗
     [∗ list] i ∈ seq 0 BS,
       slot_inv γc γw L (Z.to_nat bid * BS + i) (b +ₗ (3 + 2 * Z.of_nat i)).
 
@@ -265,10 +267,12 @@ Section spec.
     end.
 
   Definition is_block_chain (γc γw : gname) (L : list val) (blocks : list (loc * Z))
-      (first : loc) : iProp Σ :=
+      (wrap_to : loc) (rs : nat) : iProp Σ :=
     [∗ list] i↦blk ∈ blocks,
       let '(b, bid) := blk in
-      is_block γc γw L b bid (block_next blocks i first).
+      if decide (rs ≤ i)%nat then
+        is_block γc γw L b bid (block_next blocks i wrap_to)
+      else True.
 
   (* -------------------------------------------------------------- *)
   (*  @inv(Queue State)                                              *)
@@ -280,7 +284,8 @@ Section spec.
     ∃ (L : list val) (h t : nat)
       (lock_val : Z) (hb tb : loc) (cap : Z)
       (blocks : list (loc * Z))
-      (hi ti : nat) (C W : gmap nat ()),
+      (hi ti : nat) (C W : gmap nat ())
+      (rs : nat) (wrap_to : loc),
     own γ.(γ_list) (●ML{# (1/2)%Qp} L) ∗
     own γ.(γ_blocks) (●ML (blocks.*1)) ∗
     mono_nat_auth_own γ.(γ_head) (1/2)%Qp h ∗
@@ -305,10 +310,9 @@ Section spec.
     ⌜∀ k : nat, t ≤ k → W !! k = None⌝ ∗
     (if decide (lock_val = 0) then ghost_var γ.(γ_lock) (1/2) (length blocks, tb) else True) ∗
     ghost_var γ.(γ_lock) (1/2) (length blocks, tb) ∗
-    match blocks with
-    | [] => True
-    | (first, _) :: _ => is_block_chain γ.(γ_claims) γ.(γ_writes) L blocks first
-    end.
+    ⌜rs = 0⌝ ∗
+    ⌜blocks.*1 !! 0 = Some wrap_to⌝ ∗
+    is_block_chain γ.(γ_claims) γ.(γ_writes) L blocks wrap_to rs.
 
   Definition is_queue (γ : queue_name) (q : loc) : iProp Σ :=
     inv queueN (queue_inv_inner γ q).
@@ -375,7 +379,7 @@ Section spec.
     iApply ("HΦ" $! γ). iSplitR "Hauth2 Hhead2 Htail2".
     2:{ unfold queue_content. simpl. iFrame. iModIntro. done. }
     iApply inv_alloc. iNext. unfold queue_inv_inner.
-    iExists [], 0%nat, 0%nat, 0%Z, block, block, CHUNKED_QUEUE_BLOCK_SIZE, [(block, 0%Z)], 0%nat, 0%nat, ∅, ∅.
+    iExists [], 0%nat, 0%nat, 0%Z, block, block, CHUNKED_QUEUE_BLOCK_SIZE, [(block, 0%Z)], 0%nat, 0%nat, ∅, ∅, 0%nat, block.
     simpl. iFrame "Hauth1 Hblk_auth Hhead1 Htail1 Hclaims Hwrites".
     rewrite Loc.add_0. iFrame "Hq0 Hq1 Hq2 Hq3 Hq4 Hq5".
     iSplit; first done.
@@ -390,8 +394,12 @@ Section spec.
     iSplit; first (iPureIntro; intros k _; apply lookup_empty).
     iSplit; first (iPureIntro; intros k _; apply lookup_empty).
     simpl. iFrame "Hgv_lk1 Hgv_lk2".
-    unfold is_block_chain. simpl. rewrite right_id. unfold is_block. rewrite Loc.add_0.
+    iSplit; first (iPureIntro; lia).
+    iSplit; first (iPureIntro; done).
+    unfold is_block_chain. simpl.
+    rewrite right_id. unfold is_block. rewrite Loc.add_0.
     iExists 0. iFrame "Hb0 Hb1 Hb2".
+    iSplit; first (iPureIntro; unfold CHUNKED_QUEUE_BLOCK_SIZE; lia).
     change BS with 64%nat. change (Z.to_nat 0) with 0%nat.
     iAssert (∀ (n : nat), ⌜(n ≤ 64)%nat⌝ -∗
       (block +ₗ (3 + 2 * Z.of_nat (64 - n))) ↦∗ replicate (2 * n) #0 -∗
@@ -455,16 +463,32 @@ Section spec.
     simpl. done.
   Qed.
 
-  Lemma is_block_chain_grow γc γw L blocks (first last_blk new_blk : loc)
-      last_bid new_bid :
-    blocks ≠ [] →
-    last blocks = Some (last_blk, last_bid) →
-    is_block_chain γc γw L blocks first -∗
-    (last_blk +ₗ 0) ↦ #new_blk -∗
-    is_block γc γw L new_blk new_bid first -∗
-    is_block_chain γc γw L (blocks ++ [(new_blk, new_bid)]) first.
+  Lemma is_block_chain_lookup γc γw L blocks wrap_to rs k b bid :
+    blocks !! k = Some (b, bid) →
+    (rs ≤ k)%nat →
+    is_block_chain γc γw L blocks wrap_to rs -∗
+    is_block γc γw L b bid (block_next blocks k wrap_to) ∗
+    (is_block γc γw L b bid (block_next blocks k wrap_to) -∗
+     is_block_chain γc γw L blocks wrap_to rs).
   Proof.
-    iIntros (Hne Hlast) "Hchain Hn_new Hblk_new".
+    iIntros (Hk Hrs) "Hchain".
+    iDestruct (big_sepL_lookup_acc with "Hchain") as "[Hblk Hrest]"; first exact Hk.
+    simpl.
+    destruct (decide (rs ≤ k)%nat) as [_|Habs]; [|lia].
+    iFrame.
+  Qed.
+
+  Lemma is_block_chain_grow γc γw L blocks (wrap_to last_blk new_blk : loc)
+      last_bid new_bid rs :
+    blocks ≠ [] →
+    (rs ≤ length blocks)%nat →
+    last blocks = Some (last_blk, last_bid) →
+    is_block_chain γc γw L blocks wrap_to rs -∗
+    (last_blk +ₗ 0) ↦ #new_blk -∗
+    is_block γc γw L new_blk new_bid wrap_to -∗
+    is_block_chain γc γw L (blocks ++ [(new_blk, new_bid)]) wrap_to rs.
+  Proof.
+    iIntros (Hne Hrs Hlast) "Hchain Hn_new Hblk_new".
     assert (∃ blocks_init, blocks = blocks_init ++ [(last_blk, last_bid)] ∧
       length blocks_init = length blocks - 1) as [blocks_init [Hblocks_eq Hlen_init]].
     { exists (take (length blocks - 1) blocks). split.
@@ -480,30 +504,29 @@ Section spec.
     set (old_blocks := blocks_init ++ [(last_blk, last_bid)]).
     set (new_blocks := old_blocks ++ [(new_blk, new_bid)]).
     unfold is_block_chain.
-    (* Split old chain using big_sepL_snoc *)
     rewrite /old_blocks big_sepL_snoc.
     iDestruct "Hchain" as "[Hchain_init Hblk_last]".
     simpl.
-    iDestruct "Hblk_last" as (ec_last) "(Hn_old & Hbid_last & Hec_last & Hsl_last)".
-    (* Build new chain using big_sepL_snoc twice *)
     rewrite /new_blocks big_sepL_snoc.
-    iSplitL "Hchain_init Hn_new Hbid_last Hec_last Hsl_last".
+    iSplitL "Hchain_init Hn_new Hblk_last".
     - rewrite /old_blocks big_sepL_snoc.
       iSplitL "Hchain_init".
       + iApply (big_sepL_impl with "Hchain_init").
         iIntros "!>" (k [b bid] Hk) "Hblk".
-        assert (k < length blocks_init) as Hk_bound.
-        { apply lookup_lt_Some in Hk. done. }
-        assert (S k < length old_blocks) as Hsk.
-        { rewrite /old_blocks length_app. simpl. lia. }
-        rewrite (block_next_app_lt old_blocks); [|exact Hsk].
-        done.
+        assert (k < length blocks_init) as Hk_bound
+          by (apply lookup_lt_Some in Hk; done).
+        assert (S k < length old_blocks) as Hsk
+          by (rewrite /old_blocks length_app; simpl; lia).
+        rewrite (block_next_app_lt old_blocks); [done|exact Hsk].
       + simpl.
+        case_decide as Hrs_li; last done.
         replace (length blocks_init) with (length old_blocks - 1)%nat
           by (rewrite /old_blocks length_app; simpl; lia).
         rewrite (block_next_app_last old_blocks); [|rewrite /old_blocks; destruct blocks_init; discriminate].
+        iDestruct "Hblk_last" as (ec_last) "(Hn_old & Hbid_last & Hec_last & Hsl_last)".
         unfold is_block. iExists ec_last. iFrame.
     - simpl.
+      case_decide; last done.
       rewrite (block_next_app_new old_blocks).
       done.
   Qed.
@@ -527,29 +550,31 @@ Section spec.
     unfold chunked_queue_push_grow_loop. wp_rec. wp_pures.
     (* Load tail.block_id for comparison *)
     wp_bind (! _)%E.
-    iInv "Hinv" as (L1 h1 t1 lv1 hb1 tb1 cap1 blocks1 hi1 ti1 C1 W1)
+    iInv "Hinv" as (L1 h1 t1 lv1 hb1 tb1 cap1 blocks1 hi1 ti1 C1 W1 rs1 wrap_to1)
       ">(Ha1 & Hba1 & Hh1 & Ht1 & Hcl1 & Hwr1 & %Ht1 & %Hht1 & Hlk1 & %Hlv1 &
          Hhb1 & Hhl1 & Htb1 & Htl1 & Hcap1 &
-         %Hne1 & %Hhi1 & %Htb_in1 & %Hti1 & %Htilast1 & %Hbids1 & %Hcfresh1 & %Hwfresh1 & Hgvlk1 & Hgv1 & Hch1)".
+         %Hne1 & %Hhi1 & %Htb_in1 & %Hti1 & %Htilast1 & %Hbids1 & %Hcfresh1 & %Hwfresh1 & Hgvlk1 & Hgv1 & %Hrs_le_hi1 & %Hwrap_in1 & Hch1)".
     iDestruct (own_valid_2 with "Hba1 Hlb0") as %[_ Hpfx1]%mono_list_both_dfrac_valid_L.
+    iDestruct (ghost_var_agree with "Hgvtok Hgv1") as %Hnblk1.
+    injection Hnblk1 as Hnblk1 _.
     assert (blocks1.*1 !! ti0 = Some tail) as Htail_in1.
     { eapply prefix_lookup_Some; [|exact Hpfx1].
       rewrite list_lookup_fmap. rewrite Hti0. done. }
     assert (∃ bid1, blocks1 !! ti0 = Some (tail, bid1)) as [bid1 Htail_blk1].
     { rewrite list_lookup_fmap in Htail_in1.
       destruct (blocks1 !! ti0) as [[? ?]|]; [simpl in *; simplify_eq; eauto|done]. }
+    assert (rs1 ≤ ti0)%nat as Hrs_le_ti0.
+    { assert (hi1 < length blocks1)%nat by (eapply lookup_lt_Some; exact Hhi1). lia. }
     assert (bid1 = Z.of_nat ti0) as -> by (apply (Hbids1 _ _ Htail_blk1)).
     destruct blocks1 as [|[first1 fb1] blocks1']; first done.
-    iDestruct (big_sepL_lookup_acc with "Hch1") as "[Hblk1 Hrest1]"; first exact Htail_blk1.
+    iDestruct (is_block_chain_lookup with "Hch1") as "[Hblk1 Hrest1]"; [exact Htail_blk1|lia|].
     iDestruct "Hblk1" as (ec1) "(Hn1 & Hbid1 & Hec1 & Hsl1)".
     wp_load.
     iDestruct ("Hrest1" with "[Hn1 Hbid1 Hec1 Hsl1]") as "Hch1"; first (iExists ec1; iFrame).
     iDestruct (own_mono _ _ (◯ML (((first1,fb1)::blocks1').*1 : list (leibnizO loc))) with "Hba1") as "#Hlb1".
     { apply mono_list_included. }
-    iDestruct (ghost_var_agree with "Hgvtok Hgv1") as %Hnblk1.
-    injection Hnblk1 as Hnblk1 _.
     iModIntro. iSplitR "HΦ Hgvtok".
-    { iNext. iExists L1,h1,t1,lv1,hb1,tb1,cap1,((first1,fb1)::blocks1'),hi1,ti1,C1,W1. iFrame. done. }
+    { iNext. iExists L1,h1,t1,lv1,hb1,tb1,cap1,((first1,fb1)::blocks1'),hi1,ti1,C1,W1,rs1,wrap_to1. iFrame. done. }
     wp_pures.
     (* Branch on tail.block_id < block_id *)
     destruct (decide (Z.of_nat ti0 < block_id)%Z) as [Hlt|Hge].
@@ -560,47 +585,53 @@ Section spec.
       (* ====== 2 loads for the reuse/allocate check ====== *)
       (* Load 1: next = !(tail +ₗ 0) *)
       wp_bind (! #(tail +ₗ 0))%E.
-      iInv "Hinv" as (La ha ta lva hba tba capa blocksa hia tia Ca Wa)
+      iInv "Hinv" as (La ha ta lva hba tba capa blocksa hia tia Ca Wa rsa wrap_toa)
         ">(Haa & Hbaa & Hha & Hta' & Hcla & Hwra & %Hta & %Hhta & Hlka & %Hlva &
            Hhba & Hhla & Htba & Htla & Hcapa &
-           %Hnea & %Hhia & %Htb_ina & %Htia & %Htilasta & %Hbidsa & %Hcfresha & %Hwfresha & Hgvlka & Hgva & Hcha)".
+           %Hnea & %Hhia & %Htb_ina & %Htia & %Htilasta & %Hbidsa & %Hcfresha & %Hwfresha & Hgvlka & Hgva & %Hrs_le_hia & %Hwrap_ina & Hcha)".
       iDestruct (own_valid_2 with "Hbaa Hlb1") as %[_ Hpfxa]%mono_list_both_dfrac_valid_L.
+      iDestruct (ghost_var_agree with "Hgvtok Hgva") as %Hnblka.
+      injection Hnblka as Hnblka _.
       assert (blocksa.*1 !! ti0 = Some tail) as Htail_fmapa.
       { eapply prefix_lookup_Some; [|exact Hpfxa].
         rewrite list_lookup_fmap. simpl.
         rewrite (list_lookup_fmap fst ((first1,fb1)::blocks1') ti0) in Htail_in1.
         exact Htail_in1. }
+      assert (rsa ≤ ti0)%nat as Hrs_le_ti0_a.
+      { assert (hia < length blocksa)%nat by (eapply lookup_lt_Some; exact Hhia).
+        assert (length blocksa = S ti0).
+        { transitivity nblk0. symmetry; exact Hnblka. rewrite Hnblk0. symmetry; exact Hti0_last. }
+        lia. }
       assert (blocksa !! ti0 = Some (tail, Z.of_nat ti0)) as Htail_blka.
       { rewrite list_lookup_fmap in Htail_fmapa.
         destruct (blocksa !! ti0) as [[? z]|] eqn:Heq; [|done].
         simpl in Htail_fmapa. injection Htail_fmapa as ->.
         assert (z = Z.of_nat ti0) as -> by (apply (Hbidsa _ _ Heq)). done. }
       destruct blocksa as [|[firsta fba] blocksa']; first done.
-      iDestruct (big_sepL_lookup_acc with "Hcha") as "[Hblka Hresta]"; first exact Htail_blka.
-      iDestruct "Hblka" as (eca) "(Hna & Hbida & Heca & Hsla)".
+      assert (wrap_toa = firsta) as Hwrap_eq by (simpl in Hwrap_ina; congruence).
+      subst wrap_toa.
+      iDestruct (is_block_chain_lookup with "Hcha") as "[Hblka Hresta]"; [exact Htail_blka|lia|].
+      iDestruct "Hblka" as (eca) "[Hna [Hbida [Heca [%Heca_bounds Hsla]]]]".
       wp_load.
-      set (tail_next := block_next ((firsta, fba) :: blocksa') ti0 firsta).
-      iDestruct ("Hresta" with "[Hna Hbida Heca Hsla]") as "Hcha"; first (iExists eca; iFrame).
-      iDestruct (ghost_var_agree with "Hgvtok Hgva") as %Hnblka.
-      injection Hnblka as Hnblka_len Hnblka_tb.
-      assert (S ti0 = length ((firsta, fba) :: blocksa')) as Hlena.
-      { simpl in *. lia. }
-      assert (tail_next = firsta) as Htail_next_eq.
-      { unfold tail_next, block_next.
+      assert (block_next ((firsta, fba) :: blocksa') ti0 firsta = firsta) as Htail_next_eq.
+      { unfold block_next.
+        assert (S ti0 = length ((firsta, fba) :: blocksa')) by (simpl in *; lia).
         rewrite lookup_ge_None_2; [done|lia]. }
+      iDestruct ("Hresta" with "[Hna Hbida Heca Hsla]") as "Hcha".
+      { iExists eca. iFrame. iPureIntro. exact Heca_bounds. }
       iDestruct (own_mono _ _ (◯ML (((firsta,fba)::blocksa').*1 : list (leibnizO loc))) with "Hbaa") as "#Hlba".
       { apply mono_list_included. }
       iModIntro. iSplitR "HΦ Hgvtok".
-      { iNext. iExists La,ha,ta,lva,hba,tba,capa,((firsta,fba)::blocksa'),hia,tia,Ca,Wa. iFrame. done. }
+      { iNext. iExists La,ha,ta,lva,hba,tba,capa,((firsta,fba)::blocksa'),hia,tia,Ca,Wa,rsa,firsta. iFrame. done. }
       wp_pures.
-
-      (* Load 2: ec = !(tail_next +ₗ 2) = !(firsta +ₗ 2) *)
-      wp_bind (! #(tail_next +ₗ 2))%E.
       rewrite Htail_next_eq.
-      iInv "Hinv" as (Lb hb0 tb0' lvb hbb tbb capb blocksb hib tib Cb Wb)
+
+      (* Load 2: ec = !(firsta +ₗ 2) *)
+      wp_bind (! _)%E.
+      iInv "Hinv" as (Lb hb0 tb0' lvb hbb tbb capb blocksb hib tib Cb Wb rsb wrap_tob)
         ">(Hab & Hbab & Hhb & Htb' & Hclb & Hwrb & %Htb_eq & %Hhtb & Hlkb & %Hlvb &
            Hhbb & Hhlb & Htbb & Htlb & Hcapb &
-           %Hneb & %Hhib & %Htb_inb & %Htib & %Htilastb & %Hbidsb & %Hcfreshb & %Hwfreshb & Hgvlkb & Hgvb & Hchb)".
+           %Hneb & %Hhib & %Htb_inb & %Htib & %Htilastb & %Hbidsb & %Hcfreshb & %Hwfreshb & Hgvlkb & Hgvb & %Hrs_le_hib & %Hwrap_inb & Hchb)".
       iDestruct (own_valid_2 with "Hbab Hlba") as %[_ Hpfxb]%mono_list_both_dfrac_valid_L.
       assert (blocksb.*1 !! 0 = Some firsta) as Hfirst_fmapb.
       { eapply prefix_lookup_Some; [|exact Hpfxb]. done. }
@@ -608,23 +639,25 @@ Section spec.
       { rewrite list_lookup_fmap in Hfirst_fmapb.
         destruct (blocksb !! 0) as [[? z]|] eqn:Heq; [|done].
         simpl in Hfirst_fmapb. injection Hfirst_fmapb as ->. eauto. }
-      assert (fbb = Z.of_nat 0) as -> by (apply (Hbidsb _ _ Hfirst_blkb)).
       destruct blocksb as [|[firstb fbb'] blocksb']; first done.
       simpl in Hfirst_blkb. injection Hfirst_blkb as -> ->.
-      iDestruct (big_sepL_lookup_acc with "Hchb") as "[Hblkb Hrestb]"; first by apply lookup_cons_Some; left.
-      iDestruct "Hblkb" as (ecb) "(Hnb & Hbidb & Hecb & Hslb)".
+      iDestruct (is_block_chain_lookup with "Hchb") as "[Hblkb Hrestb]".
+      { by apply lookup_cons_Some; left. }
+      { lia. }
+      iDestruct "Hblkb" as (ecb) "[Hnb [Hbidb [Hecb [%Hecb_bounds Hslb]]]]".
       wp_load.
-      iDestruct ("Hrestb" with "[Hnb Hbidb Hecb Hslb]") as "Hchb"; first (iExists ecb; iFrame).
+      iDestruct ("Hrestb" with "[Hnb Hbidb Hecb Hslb]") as "Hchb".
+      { iExists ecb. iFrame. iPureIntro. exact Hecb_bounds. }
       iModIntro. iSplitR "HΦ Hgvtok".
-      { iNext. iExists Lb,hb0,tb0',lvb,hbb,tbb,capb,((firsta,0%Z)::blocksb'),hib,tib,Cb,Wb. iFrame. done. }
+      { iNext. iExists Lb,hb0,tb0',lvb,hbb,tbb,capb,((firsta,fbb)::blocksb'),hib,tib,Cb,Wb,rsb,wrap_tob. iFrame. done. }
       wp_pures.
 
       (* Clear stale hypotheses *)
       clear Hta Hhta Hlva Hnea Hhia Htb_ina Htia Htilasta Hbidsa Hcfresha Hwfresha
-            Htail_fmapa Htail_blka Hnblka_len Hnblka_tb Hlena Hpfxa.
+            Htail_fmapa Htail_blka Hnblka Hpfxa.
       clear La ha ta lva hba tba capa hia tia Ca Wa.
-      clear Htb_eq Hhtb Hlvb Hneb Hhib Htb_inb Htib Htilastb Hbidsb Hcfreshb Hwfreshb Hpfxb Hfirst_fmapb.
-      clear Lb hb0 tb0' lvb hbb tbb capb blocksb' hib tib Cb Wb.
+      clear Htb_eq Hhtb Hlvb Hneb Hhib Htb_inb Htib Htilastb Hbidsb Hcfreshb Hwfreshb Hpfxb Hfirst_fmapb Hwrap_inb Hrs_le_hib.
+      clear Lb hb0 tb0' lvb hbb tbb capb blocksb' hib tib Cb Wb rsb wrap_tob fbb.
 
       (* Branch: ec = BS? *)
       destruct (decide (ecb = CHUNKED_QUEUE_BLOCK_SIZE)%Z) as [Hec_full|Hec_not_full].
@@ -634,10 +667,10 @@ Section spec.
 
         (* Store 1: next +ₗ 2 <- 0 — reset empty_count *)
         wp_bind (_ <- _)%E.
-        iInv "Hinv" as (Lc hc tc lvc hbc tbc capc blocksc hic tic Cc Wc)
+        iInv "Hinv" as (Lc hc tc lvc hbc tbc capc blocksc hic tic Cc Wc rsc wrap_toc)
           ">(Hac & Hbac & Hhc & Htc & Hclc & Hwrc & %Htc_eq & %Hhtc & Hlkc & %Hlvc &
              Hhbc & Hhlc & Htbc & Htlc & Hcapc &
-             %Hnec & %Hhic & %Htb_inc & %Htic & %Htilastc & %Hbidsc & %Hcfreshc & %Hwfreshc & Hgvlkc & Hgvc & Hchc)".
+             %Hnec & %Hhic & %Htb_inc & %Htic & %Htilastc & %Hbidsc & %Hcfreshc & %Hwfreshc & Hgvlkc & Hgvc & %Hrs_le_hic & %Hwrap_inc & Hchc)".
         iDestruct (own_valid_2 with "Hbac Hlba") as %[_ Hpfxc]%mono_list_both_dfrac_valid_L.
         assert (blocksc.*1 !! 0 = Some firsta) as Hfirst_fmapc.
         { eapply prefix_lookup_Some; [|exact Hpfxc]. done. }
@@ -648,22 +681,23 @@ Section spec.
         assert (fbc = Z.of_nat 0) as -> by (apply (Hbidsc _ _ Hfirst_blkc)).
         destruct blocksc as [|[firstc fbc'] blocksc']; first done.
         simpl in Hfirst_blkc. injection Hfirst_blkc as -> ->.
-        iDestruct (big_sepL_lookup_acc with "Hchc") as "[Hblkc Hrestc]";
-          first by apply lookup_cons_Some; left.
-        iDestruct "Hblkc" as (ecc) "(Hnc & Hbidc & Hecc & Hslc)".
+        iDestruct (is_block_chain_lookup with "Hchc") as "[Hblkc Hrestc]".
+        { by apply lookup_cons_Some; left. }
+        { lia. }
+        iDestruct "Hblkc" as (ecc) "(Hnc & Hbidc & Hecc & %Hec_bounds_c & Hslc)".
         wp_store.
         iDestruct ("Hrestc" with "[Hnc Hbidc Hecc Hslc]") as "Hchc".
-        { iExists 0. iFrame "Hnc Hbidc Hecc Hslc". }
+        { iExists 0. iFrame. iPureIntro. unfold CHUNKED_QUEUE_BLOCK_SIZE. lia. }
         iModIntro. iSplitR "HΦ Hgvtok".
-        { iNext. iExists Lc,hc,tc,lvc,hbc,tbc,capc,((firsta,0%Z)::blocksc'),hic,tic,Cc,Wc. iFrame. done. }
+        { iNext. iExists Lc,hc,tc,lvc,hbc,tbc,capc,((firsta,0%Z)::blocksc'),hic,tic,Cc,Wc,rsc,wrap_toc. iFrame. done. }
         wp_pures.
 
         (* Load: !(tail +ₗ 1) — read tail's block_id *)
         wp_bind (! _)%E.
-        iInv "Hinv" as (Ld hd td lvd hbd tbd capd blocksd hid tid Cd Wd)
+        iInv "Hinv" as (Ld hd td lvd hbd tbd capd blocksd hid tid Cd Wd rsd wrap_tod)
           ">(Had & Hbad & Hhd & Htd & Hcld & Hwrd & %Htd_eq & %Hhtd & Hlkd & %Hlvd &
              Hhbd & Hhld & Htbd & Htld & Hcapd &
-             %Hned & %Hhid & %Htb_ind & %Htid & %Htilastd & %Hbidsd & %Hcfreshd & %Hwfreshd & Hgvlkd & Hgvd & Hchd)".
+             %Hned & %Hhid & %Htb_ind & %Htid & %Htilastd & %Hbidsd & %Hcfreshd & %Hwfreshd & Hgvlkd & Hgvd & %Hrs_le_hid & %Hwrap_ind & Hchd)".
         iDestruct (own_valid_2 with "Hbad Hlb1") as %[_ Hpfxd]%mono_list_both_dfrac_valid_L.
         assert (blocksd.*1 !! ti0 = Some tail) as Htail_fmapd.
         { eapply prefix_lookup_Some; [|exact Hpfxd].
@@ -676,12 +710,12 @@ Section spec.
           simpl in Htail_fmapd. injection Htail_fmapd as ->.
           assert (z = Z.of_nat ti0) as -> by (apply (Hbidsd _ _ Heq)). done. }
         destruct blocksd as [|[firstd fbd] blocksd']; first done.
-        iDestruct (big_sepL_lookup_acc with "Hchd") as "[Hblkd Hrestd]"; first exact Htail_blkd.
+        iDestruct (is_block_chain_lookup with "Hchd") as "[Hblkd Hrestd]"; [exact Htail_blkd|lia|].
         iDestruct "Hblkd" as (ecd) "(Hnd & Hbidd & Hecd & Hsld)".
         wp_load.
         iDestruct ("Hrestd" with "[Hnd Hbidd Hecd Hsld]") as "Hchd"; first (iExists ecd; iFrame).
         iModIntro. iSplitR "HΦ Hgvtok".
-        { iNext. iExists Ld,hd,td,lvd,hbd,tbd,capd,((firstd,fbd)::blocksd'),hid,tid,Cd,Wd. iFrame. done. }
+        { iNext. iExists Ld,hd,td,lvd,hbd,tbd,capd,((firstd,fbd)::blocksd'),hid,tid,Cd,Wd,rsd,wrap_tod. iFrame. done. }
         wp_pures.
 
         (* Store 2: next +ₗ 1 <- ti0 + 1 — set new block_id *)
@@ -714,10 +748,10 @@ Section spec.
         replace (new_block +ₗ 2 +ₗ 1) with (new_block +ₗ 3) in * by (rewrite Loc.add_assoc; done).
         (* Load tail.block_id for "new_block +ₗ 1 <- !(tail +ₗ 1) + 1" *)
         wp_bind (! _)%E.
-        iInv "Hinv" as (L2 h2 t2 lv2 hb2 tb2 cap2 blocks2 hi2 ti2 C2 W2)
+        iInv "Hinv" as (L2 h2 t2 lv2 hb2 tb2 cap2 blocks2 hi2 ti2 C2 W2 rs2 wrap_to2)
           ">(Ha2 & Hba2 & Hh2 & Ht2 & Hcl2 & Hwr2 & %Ht2 & %Hht2 & Hlk2 & %Hlv2 &
              Hhb2 & Hhl2 & Htb2 & Htl2 & Hcap2 &
-             %Hne2 & %Hhi2 & %Htb_in2 & %Hti2 & %Htilast2 & %Hbids2 & %Hcfresh2 & %Hwfresh2 & Hgvlk2 & Hgv2 & Hch2)".
+             %Hne2 & %Hhi2 & %Htb_in2 & %Hti2 & %Htilast2 & %Hbids2 & %Hcfresh2 & %Hwfresh2 & Hgvlk2 & Hgv2 & %Hrs_le_hi2 & %Hwrap_in2 & Hch2)".
         iDestruct (own_valid_2 with "Hba2 Hlb1") as %[_ Hpfx2]%mono_list_both_dfrac_valid_L.
         assert (blocks2.*1 !! ti0 = Some tail) as Htail_fmap2.
         { eapply prefix_lookup_Some; [|exact Hpfx2].
@@ -730,21 +764,21 @@ Section spec.
           simpl in Htail_fmap2. injection Htail_fmap2 as ->.
           assert (z = Z.of_nat ti0) as -> by (apply (Hbids2 _ _ Heq)). done. }
         destruct blocks2 as [|[first2 fb2] blocks2']; first done.
-        iDestruct (big_sepL_lookup_acc with "Hch2") as "[Hblk2 Hrest2]"; first exact Htail_blk2.
+        iDestruct (is_block_chain_lookup with "Hch2") as "[Hblk2 Hrest2]"; [exact Htail_blk2|lia|].
         iDestruct "Hblk2" as (ec2) "(Hn2 & Hbid2 & Hec2 & Hsl2)".
         wp_load.
         iDestruct ("Hrest2" with "[Hn2 Hbid2 Hec2 Hsl2]") as "Hch2"; first (iExists ec2; iFrame).
         iModIntro. iSplitR "HΦ Hnb0 Hnb1 Hnb2 Hnew_slots Hgvtok".
-        { iNext. iExists L2,h2,t2,lv2,hb2,tb2,cap2,((first2,fb2)::blocks2'),hi2,ti2,C2,W2. iFrame. done. }
+        { iNext. iExists L2,h2,t2,lv2,hb2,tb2,cap2,((first2,fb2)::blocks2'),hi2,ti2,C2,W2,rs2,wrap_to2. iFrame. done. }
         wp_pures.
         (* Store new_block.block_id = ti0 + 1 *)
         wp_store. wp_pures.
         (* Load tail.next for "new_block +ₗ 0 <- !(tail +ₗ 0)" *)
         wp_bind (! _)%E.
-        iInv "Hinv" as (L3 h3 t3 lv3 hb3 tb3 cap3 blocks3 hi3 ti3 C3 W3)
+        iInv "Hinv" as (L3 h3 t3 lv3 hb3 tb3 cap3 blocks3 hi3 ti3 C3 W3 rs3 wrap_to3)
           ">(Ha3 & Hba3 & Hh3 & Ht3 & Hcl3 & Hwr3 & %Ht3 & %Hht3 & Hlk3 & %Hlv3 &
              Hhb3 & Hhl3 & Htb3 & Htl3 & Hcap3 &
-             %Hne3 & %Hhi3 & %Htb_in3 & %Hti3 & %Htilast3 & %Hbids3 & %Hcfresh3 & %Hwfresh3 & Hgvlk3 & Hgv3 & Hch3)".
+             %Hne3 & %Hhi3 & %Htb_in3 & %Hti3 & %Htilast3 & %Hbids3 & %Hcfresh3 & %Hwfresh3 & Hgvlk3 & Hgv3 & %Hrs_le_hi3 & %Hwrap_in3 & Hch3)".
         iDestruct (own_valid_2 with "Hba3 Hlb1") as %[_ Hpfx3]%mono_list_both_dfrac_valid_L.
         assert (blocks3.*1 !! ti0 = Some tail) as Htail_fmap3.
         { eapply prefix_lookup_Some; [|exact Hpfx3].
@@ -757,7 +791,8 @@ Section spec.
           simpl in Htail_fmap3. injection Htail_fmap3 as ->.
           assert (z = Z.of_nat ti0) as -> by (apply (Hbids3 _ _ Heq)). done. }
         destruct blocks3 as [|[first3 fb3] blocks3']; first done.
-        iDestruct (big_sepL_lookup_acc with "Hch3") as "[Hblk3 Hrest3]"; first exact Htail_blk3.
+        assert (wrap_to3 = first3) as -> by (simpl in Hwrap_in3; congruence).
+        iDestruct (is_block_chain_lookup with "Hch3") as "[Hblk3 Hrest3]"; [exact Htail_blk3|lia|].
         iDestruct "Hblk3" as (ec3) "(Hn3 & Hbid3 & Hec3 & Hsl3)".
         wp_load.
         set (tail_next2 := block_next ((first3, fb3) :: blocks3') ti0 first3).
@@ -767,7 +802,7 @@ Section spec.
         assert (S ti0 = length ((first3, fb3) :: blocks3')) as Hlen3.
         { simpl in *. lia. }
         iModIntro. iSplitR "HΦ Hnb0 Hnb1 Hnb2 Hnew_slots Hgvtok".
-        { iNext. iExists L3,h3,t3,lv3,hb3,tb3,cap3,((first3,fb3)::blocks3'),hi3,ti3,C3,W3. iFrame. done. }
+        { iNext. iExists L3,h3,t3,lv3,hb3,tb3,cap3,((first3,fb3)::blocks3'),hi3,ti3,C3,W3,rs3,first3. iFrame. done. }
         wp_pures.
         (* Store new_block.next = tail_next2 *)
         iAssert ((new_block +ₗ 0) ↦ #0)%I with "[Hnb0]" as "Hnb0".
@@ -775,10 +810,10 @@ Section spec.
         wp_store. wp_pures.
         (* Now store tail.next <- new_block: modifies the invariant *)
         wp_bind (_ <- _)%E.
-        iInv "Hinv" as (L4 h4 t4 lv4 hb4 tb4 cap4 blocks4 hi4 ti4 C4 W4)
+        iInv "Hinv" as (L4 h4 t4 lv4 hb4 tb4 cap4 blocks4 hi4 ti4 C4 W4 rs4 wrap_to4)
           ">(Ha4 & Hba4 & Hh4 & Ht4 & Hcl4 & Hwr4 & %Ht4 & %Hht4 & Hlk4 & %Hlv4 &
              Hhb4 & Hhl4 & Htb4 & Htl4 & Hcap4 &
-             %Hne4 & %Hhi4 & %Htb_in4 & %Hti4 & %Htilast4 & %Hbids4 & %Hcfresh4 & %Hwfresh4 & Hgvlk4 & Hgv4 & Hch4)".
+             %Hne4 & %Hhi4 & %Htb_in4 & %Hti4 & %Htilast4 & %Hbids4 & %Hcfresh4 & %Hwfresh4 & Hgvlk4 & Hgv4 & %Hrs_le_hi4 & %Hwrap_in4 & Hch4)".
         iDestruct (own_valid_2 with "Hba4 Hlb1") as %[_ Hpfx4]%mono_list_both_dfrac_valid_L.
         assert (blocks4.*1 !! ti0 = Some tail) as Htail_fmap4.
         { eapply prefix_lookup_Some; [|exact Hpfx4].
@@ -791,6 +826,8 @@ Section spec.
           simpl in Htail_fmap4. injection Htail_fmap4 as ->.
           assert (z = Z.of_nat ti0) as -> by (apply (Hbids4 _ _ Heq)). done. }
         destruct blocks4 as [|[first4 fb4] blocks4']; first done.
+        assert (wrap_to4 = first4) as -> by (simpl in Hwrap_in4; congruence).
+        subst rs4.
         iDestruct (ghost_var_agree with "Hgvtok Hgv4") as %Hnblk4.
         injection Hnblk4 as Hnblk4 Htb_eq4.
         assert (ti0 = length blocks4') as Hti0_len.
@@ -811,6 +848,7 @@ Section spec.
         iDestruct "Hch4" as "[Hch_init Hch_last]".
         simpl. rewrite Hlen_init.
         iDestruct "Hch_last" as "[Hblk_tail _]".
+        iEval (simpl) in "Hblk_tail".
         unfold is_block. unfold block_next.
         rewrite lookup_app_r; [|lia].
         replace (S ti0 - length blocks_init)%nat with 1%nat by lia.
@@ -863,7 +901,7 @@ Section spec.
         { unfold tail_next2, block_next.
           rewrite lookup_ge_None_2; [|lia]. congruence. }
         set (new_blocks := ((first4,fb4)::blocks4') ++ [(new_block, Z.of_nat (S ti0))]).
-        iAssert (is_block_chain γ.(γ_claims) γ.(γ_writes) L4 new_blocks first4)%I
+        iAssert (is_block_chain γ.(γ_claims) γ.(γ_writes) L4 new_blocks first4 0)%I
           with "[Hch_init Hn4 Hbid4 Hec4 Hsl4 Hnb0 Hnb1 Hnb2 Hslot_ind]" as "Hch_new".
         { unfold is_block_chain, new_blocks.
           rewrite Hblocks_split big_sepL_app.
@@ -885,13 +923,15 @@ Section spec.
               unfold is_block. iExists ec4. iFrame.
           - rewrite big_sepL_cons big_sepL_nil.
             rewrite right_id.
+            iEval (rewrite Htail_next2) in "Hnb0".
+            simpl.
             unfold is_block, block_next.
-            rewrite lookup_ge_None_2; [|rewrite !length_app /=; lia].
+            rewrite lookup_ge_None_2; [|simpl; rewrite ?length_app /=; lia].
             change BS with 64%nat.
             replace (Z.of_nat ti0 + 1)%Z with (Z.of_nat (S ti0)) by lia.
             replace (Z.to_nat (Z.of_nat (S ti0))) with (S ti0) by lia.
-            iEval (rewrite Htail_next2 Hfirst4) in "Hnb0".
-            iExists 0. iFrame "Hnb0 Hnb1 Hnb2 Hslot_ind". }
+            iExists 0. iFrame "Hnb0 Hnb1 Hnb2 Hslot_ind".
+            done. }
         assert (new_blocks.*1 = ((first4, fb4) :: blocks4').*1 ++ [new_block]) as Hnb_fmap.
         { rewrite /new_blocks fmap_app. simpl. done. }
         assert (((first4, fb4) :: blocks4').*1 `prefix_of` new_blocks.*1) as Hpfx_new.
@@ -933,7 +973,7 @@ Section spec.
           assert (∃ ci, new_blocks !! ci = Some (tb4, Z.of_nat ci)) as Htb_in_new.
           { destruct Htb_in4 as [ci4 Hci4].
             exists ci4. rewrite /new_blocks lookup_app_l; [exact Hci4|apply lookup_lt_Some in Hci4; done]. }
-          iExists L4,h4,t4,1%Z,hb4,tb4,cap4,new_blocks,hi4,(S ti0),C4,W4.
+          iExists L4,h4,t4,1%Z,hb4,tb4,cap4,new_blocks,hi4,(S ti0),C4,W4,0,first4.
           rewrite /new_blocks. simpl.
           iEval (rewrite Htb_eq4) in "Hgv4".
           iFrame "Ha4 Hba4 Hh4 Ht4 Hcl4 Hwr4 Hlk4 Hhb4 Hhl4 Htb4 Htl4 Hcap4 Hgv4 Hch_new".
@@ -941,20 +981,20 @@ Section spec.
         wp_pures.
         (* Load capacity: !(queue +ₗ 5) *)
         wp_bind (! _)%E.
-        iInv "Hinv" as (L5 h5 t5 lv5 hb5 tb5 cap5 blocks5 hi5 ti5 C5 W5)
+        iInv "Hinv" as (L5 h5 t5 lv5 hb5 tb5 cap5 blocks5 hi5 ti5 C5 W5 rs5 wrap_to5)
           ">(Ha5 & Hba5 & Hh5 & Ht5 & Hcl5 & Hwr5 & %Ht5 & %Hht5 & Hlk5 & %Hlv5 &
              Hhb5 & Hhl5 & Htb5 & Htl5 & Hcap5 &
-             %Hne5 & %Hhi5 & %Htb_in5 & %Hti5 & %Htilast5 & %Hbids5 & %Hcfresh5 & %Hwfresh5 & Hgvlk5 & Hgv5 & Hch5)".
+             %Hne5 & %Hhi5 & %Htb_in5 & %Hti5 & %Htilast5 & %Hbids5 & %Hcfresh5 & %Hwfresh5 & Hgvlk5 & Hgv5 & %Hrs_le_hi5 & %Hwrap_in5 & Hch5)".
         wp_load. iModIntro.
         iSplitR "HΦ Hgvtok".
-        { iNext. iExists L5,h5,t5,lv5,hb5,tb5,cap5,blocks5,hi5,ti5,C5,W5. iFrame. done. }
+        { iNext. iExists L5,h5,t5,lv5,hb5,tb5,cap5,blocks5,hi5,ti5,C5,W5,rs5,wrap_to5. iFrame. done. }
         wp_pures.
         (* Store new capacity: queue +ₗ 5 <- cap5 + BLOCK_SIZE *)
         wp_bind (_ <- _)%E.
-        iInv "Hinv" as (L6 h6 t6 lv6 hb6 tb6 cap6 blocks6 hi6 ti6 C6 W6)
+        iInv "Hinv" as (L6 h6 t6 lv6 hb6 tb6 cap6 blocks6 hi6 ti6 C6 W6 rs6 wrap_to6)
           ">(Ha6 & Hba6 & Hh6 & Ht6 & Hcl6 & Hwr6 & %Ht6 & %Hht6 & Hlk6 & %Hlv6 &
              Hhb6 & Hhl6 & Htb6 & Htl6 & Hcap6 &
-             %Hne6 & %Hhi6 & %Htb_in6 & %Hti6 & %Htilast6 & %Hbids6 & %Hcfresh6 & %Hwfresh6 & Hgvlk6 & Hgv6 & Hch6)".
+             %Hne6 & %Hhi6 & %Htb_in6 & %Hti6 & %Htilast6 & %Hbids6 & %Hcfresh6 & %Hwfresh6 & Hgvlk6 & Hgv6 & %Hrs_le_hi6 & %Hwrap_in6 & Hch6)".
         wp_store.
         destruct Hlv6 as [Hlv6_zero|Hlv6_one].
         { subst lv6. simpl.
@@ -965,7 +1005,7 @@ Section spec.
         replace lv6 with 1%Z by lia.
         iModIntro.
         iSplitR "HΦ Hgvtok".
-        { iNext. iExists L6,h6,t6,1%Z,hb6,tb6,(cap5 + CHUNKED_QUEUE_BLOCK_SIZE)%Z,blocks6,hi6,ti6,C6,W6.
+        { iNext. iExists L6,h6,t6,1%Z,hb6,tb6,(cap5 + CHUNKED_QUEUE_BLOCK_SIZE)%Z,blocks6,hi6,ti6,C6,W6,rs6,wrap_to6.
           simpl. iFrame. repeat iSplit; try (iPureIntro; first [done | lia]). }
         (* Recurse via IH *)
         change ((rec: "grow" "queue" "tail" "block_id" :=
@@ -1044,10 +1084,10 @@ Section spec.
     wp_rec. wp_pures.
     (* Load cursor.block_id *)
     wp_bind (! _)%E.
-    iInv "Hinv" as (Li hi ti lvi hbi tbi capi blocksi hii tii Ci Wi)
+    iInv "Hinv" as (Li hi ti lvi hbi tbi capi blocksi hii tii Ci Wi rsi wrap_toi)
       ">(Hai & Hbai & Hhi & Hti & Hclaimsi & Hwritesi & %Hti_eq & %Hhti & Hlki & %Hlvi &
          Hhbi & Hhli & Htbi & Htli & Hcapi &
-         %Hnei & %Hhii & %Htb_ini & %Htii & %Htilasti & %Hbidsi & %Hcfreshi & %Hwfreshi & Hgvlki & Hgvi & Hchi)".
+         %Hnei & %Hhii & %Htb_ini & %Htii & %Htilasti & %Hbidsi & %Hcfreshi & %Hwfreshi & Hgvlki & Hgvi & %Hrs_le_hii & %Hwrap_ini & Hchi)".
     iDestruct (own_valid_2 with "Hbai Hlb_blocks") as %[_ Hpfx]%mono_list_both_dfrac_valid_L.
     assert (blocksi.*1 !! ci = Some cursor) as Hci_cur
       by (eapply prefix_lookup_Some; [exact Hci | exact Hpfx]).
@@ -1056,11 +1096,11 @@ Section spec.
       destruct (blocksi !! ci) as [[? ?]|]; [simpl in *; simplify_eq; eauto|done]. }
     assert (bid_i = Z.of_nat ci) as -> by (apply (Hbidsi _ _ Hcur_blk)).
     destruct blocksi as [|[firsti fbi] blocksi']; first done.
-    iDestruct (big_sepL_lookup_acc with "Hchi") as "[Hblk Hrest]"; first exact Hcur_blk.
+    iDestruct (is_block_chain_lookup with "Hchi") as "[Hblk Hrest]"; [exact Hcur_blk|lia|].
     iDestruct "Hblk" as (eci) "(Hnext & Hbid & Heci & Hslots)". wp_load.
     iDestruct ("Hrest" with "[Hnext Hbid Heci Hslots]") as "Hchi"; first (iExists eci; iFrame).
     iModIntro. iSplitR "Hwtok HΦ".
-    { iNext. iExists Li,hi,ti,lvi,hbi,tbi,capi,((firsti,fbi)::blocksi'),hii,tii,Ci,Wi. iFrame. done. }
+    { iNext. iExists Li,hi,ti,lvi,hbi,tbi,capi,((firsti,fbi)::blocksi'),hii,tii,Ci,Wi,rsi,wrap_toi. iFrame. done. }
     wp_pures.
     destruct (decide (Z.of_nat ci = block_id)) as [Heq|Hne].
     - (* Correct block — do the three stores *)
@@ -1071,10 +1111,10 @@ Section spec.
       assert (seq 0 BS !! si = Some si) as Hseq by (apply lookup_seq; lia).
       (* Store 1: state ← 1 (Empty → Writing) *)
       wp_bind (_ <- _)%E.
-      iInv "Hinv" as (Lw hw tw lvw hbw tbw capw blocksw hiw tiw Cw Ww)
+      iInv "Hinv" as (Lw hw tw lvw hbw tbw capw blocksw hiw tiw Cw Ww rsw wrap_tow)
         ">(Haw & Hbaw & Hhw & Htw & Hclaimsw & Hwritesw & %Htw & %Hhtw & Hlkw & %Hlvw &
            Hhbw & Hhlw & Htbw & Htlw & Hcapw &
-           %Hnew & %Hhiw & %Htb_inw & %Htiw & %Htilastw & %Hbidsw & %Hcfw & %Hwfw & Hgvlkw & Hgvw & Hchw)".
+           %Hnew & %Hhiw & %Htb_inw & %Htiw & %Htilastw & %Hbidsw & %Hcfw & %Hwfw & Hgvlkw & Hgvw & %Hrs_le_hiw & %Hwrap_inw & Hchw)".
       iDestruct (own_valid_2 with "Hbaw Hlb_blocks") as %[_ Hpfxw]%mono_list_both_dfrac_valid_L.
       assert (blocksw.*1 !! ci = Some cursor) as Hciw
         by (eapply prefix_lookup_Some; [exact Hci | exact Hpfxw]).
@@ -1083,8 +1123,8 @@ Section spec.
         destruct (blocksw !! ci) as [[? ?]|]; [simpl in *; simplify_eq; eauto|done]. }
       assert (bw = Z.of_nat ci) as -> by (apply (Hbidsw _ _ Hblkw)).
       destruct blocksw as [|[fw fbw] blocksw']; first done.
-      iDestruct (big_sepL_lookup_acc with "Hchw") as "[Hblk Hrest]"; first exact Hblkw.
-      iDestruct "Hblk" as (ecw) "(Hn & Hb & Hecw & Hsl)".
+      iDestruct (is_block_chain_lookup with "Hchw") as "[Hblk Hrest]"; [exact Hblkw|lia|].
+      iDestruct "Hblk" as (ecw) "(Hn & Hb & Hecw & %Hecw_bounds & Hsl)".
       iDestruct (big_sepL_lookup_acc with "Hsl") as "[Hslot Hsl_rest]"; first exact Hseq.
       replace (Z.of_nat si) with slot_idx
         by (subst si; symmetry; apply Z2Nat.id; unfold slot_idx; apply Z.rem_nonneg; lia).
@@ -1097,19 +1137,20 @@ Section spec.
         wp_store.
         iDestruct ("Hsl_rest" with "[Hst Hwtok]") as "Hsl".
         { iExists 1. iFrame. iRight. iLeft. iSplit; [done|]. rewrite Hpos_eq. iFrame. }
-        iDestruct ("Hrest" with "[Hn Hb Hecw Hsl]") as "Hch"; first (iExists ecw; iFrame).
+        iDestruct ("Hrest" with "[Hn Hb Hecw Hsl]") as "Hch".
+        { iExists ecw. iFrame. iPureIntro. exact Hecw_bounds. }
         iModIntro. iSplitR "Hv HΦ".
-        { iNext. iExists Lw,hw,tw,lvw,hbw,tbw,capw,((fw,fbw)::blocksw'),hiw,tiw,Cw,Ww. iFrame. done. }
+        { iNext. iExists Lw,hw,tw,lvw,hbw,tbw,capw,((fw,fbw)::blocksw'),hiw,tiw,Cw,Ww,rsw,wrap_tow. iFrame. done. }
         wp_pures.
         (* Store 2: slot ← data *)
         wp_store.
         wp_pures.
         (* Store 3: state ← 2 (Writing → Valid) *)
         wp_bind (_ <- _)%E.
-        iInv "Hinv" as (Lr hr tr lvr hbr tbr capr blocksr hir tir Cr Wr)
+        iInv "Hinv" as (Lr hr tr lvr hbr tbr capr blocksr hir tir Cr Wr rsr wrap_tor)
           ">(Har & Hbar & Hhr & Htr & Hclr & Hwrr & %Htr & %Hhtr & Hlkr & %Hlvr &
              Hhbr & Hhlr & Htbr & Htlr & Hcpr &
-             %Hner & %Hhir & %Htb_inr & %Htir & %Htilastr & %Hbidsr & %Hcfr & %Hwfr & Hgvlkr & Hgvr & Hchr)".
+             %Hner & %Hhir & %Htb_inr & %Htir & %Htilastr & %Hbidsr & %Hcfr & %Hwfr & Hgvlkr & Hgvr & %Hrs_le_hir & %Hwrap_inr & Hchr)".
         iDestruct (own_valid_2 with "Hbar Hlb_blocks") as %[_ Hpfxr]%mono_list_both_dfrac_valid_L.
         assert (blocksr.*1 !! ci = Some cursor) as Hcir
           by (eapply prefix_lookup_Some; [exact Hci | exact Hpfxr]).
@@ -1118,8 +1159,8 @@ Section spec.
           destruct (blocksr !! ci) as [[? ?]|]; [simpl in *; simplify_eq; eauto|done]. }
         assert (br = Z.of_nat ci) as -> by (apply (Hbidsr _ _ Hblkr)).
         destruct blocksr as [|[fr fbr] blocksr']; first done.
-        iDestruct (big_sepL_lookup_acc with "Hchr") as "[Hblk2 Hrest2]"; first exact Hblkr.
-        iDestruct "Hblk2" as (ecr) "(Hn2 & Hb2 & Hecr & Hsl2)".
+        iDestruct (is_block_chain_lookup with "Hchr") as "[Hblk2 Hrest2]"; [exact Hblkr|lia|].
+        iDestruct "Hblk2" as (ecr) "(Hn2 & Hb2 & Hecr & %Hecr_bounds & Hsl2)".
         iDestruct (big_sepL_lookup_acc with "Hsl2") as "[Hslot2 Hsl2_rest]"; first exact Hseq.
         replace (Z.of_nat si) with slot_idx
           by (subst si; symmetry; apply Z2Nat.id; unfold slot_idx; apply Z.rem_nonneg; lia).
@@ -1137,9 +1178,10 @@ Section spec.
            iDestruct ("Hsl2_rest" with "[Hstr Hv Hwk]") as "Hsl2".
            { iExists 2. iFrame. iRight. iRight. iLeft. iSplit; [done|].
              iExists v. rewrite Hpos_eq. iFrame. done. }
-           iDestruct ("Hrest2" with "[Hn2 Hb2 Hecr Hsl2]") as "Hch2"; first (iExists ecr; iFrame).
+           iDestruct ("Hrest2" with "[Hn2 Hb2 Hecr Hsl2]") as "Hch2".
+           { iExists ecr. iFrame. iPureIntro. exact Hecr_bounds. }
            iModIntro. iSplitR "HΦ".
-           { iNext. iExists Lr,hr,tr,lvr,hbr,tbr,capr,((fr,fbr)::blocksr'),hir,tir,Cr,Wr. iFrame. done. }
+           { iNext. iExists Lr,hr,tr,lvr,hbr,tbr,capr,((fr,fbr)::blocksr'),hir,tir,Cr,Wr,rsr,wrap_tor. iFrame. done. }
            wp_pures. iApply "HΦ". iLeft. done.
         ** (* Valid — contradiction: slot ↦ v' but we hold slot ↦ v *)
            iDestruct "H2r" as "[_ Hvr]". iDestruct "Hvr" as (v') "(Hvr & _ & _)".
@@ -1153,9 +1195,10 @@ Section spec.
            iDestruct ("Hsl2_rest" with "[Hstr Hv Hwkr]") as "Hsl2".
            { iExists 2. iFrame. iRight. iRight. iLeft. iSplit; [done|].
              iExists v. rewrite Hpos_eq. iFrame. done. }
-           iDestruct ("Hrest2" with "[Hn2 Hb2 Hecr Hsl2]") as "Hch2"; first (iExists ecr; iFrame).
+           iDestruct ("Hrest2" with "[Hn2 Hb2 Hecr Hsl2]") as "Hch2".
+           { iExists ecr. iFrame. iPureIntro. exact Hecr_bounds. }
            iModIntro. iSplitR "HΦ".
-           { iNext. iExists Lr,hr,tr,lvr,hbr,tbr,capr,((fr,fbr)::blocksr'),hir,tir,Cr,Wr. iFrame. done. }
+           { iNext. iExists Lr,hr,tr,lvr,hbr,tbr,capr,((fr,fbr)::blocksr'),hir,tir,Cr,Wr,rsr,wrap_tor. iFrame. done. }
            wp_pures. iApply "HΦ". iLeft. done.
       + (* Writing — contradiction, we hold write token *)
         iDestruct "H1" as "[% Hw1]". subst st.
@@ -1173,10 +1216,10 @@ Section spec.
     - (* Wrong block — follow next pointer *)
       rewrite bool_decide_eq_false_2; last (intros Hinj; inversion Hinj; lia).
       wp_pures. wp_bind (! _)%E.
-      iInv "Hinv" as (Ln hn tn lvn hbn tbn capn blocksn hin tin Cn Wn)
+      iInv "Hinv" as (Ln hn tn lvn hbn tbn capn blocksn hin tin Cn Wn rsn wrap_ton)
         ">(Han & Hban & Hhn & Htn & Hcln & Hwrn & %Htn & %Hhtn & Hlkn & %Hlvn &
            Hhbn & Hhln & Htbn & Htln & Hcpn &
-           %Hnen & %Hhin & %Htb_inn & %Htin & %Htilastn & %Hbidsn & %Hcfn & %Hwfn & Hgvlkn & Hgvn & Hchn)".
+           %Hnen & %Hhin & %Htb_inn & %Htin & %Htilastn & %Hbidsn & %Hcfn & %Hwfn & Hgvlkn & Hgvn & %Hrs_le_hin & %Hwrap_inn & Hchn)".
       iDestruct (own_valid_2 with "Hban Hlb_blocks") as %[_ Hpfxn]%mono_list_both_dfrac_valid_L.
       assert (blocksn.*1 !! ci = Some cursor) as Hcin
         by (eapply prefix_lookup_Some; [exact Hci | exact Hpfxn]).
@@ -1185,7 +1228,8 @@ Section spec.
         destruct (blocksn !! ci) as [[? ?]|]; [simpl in *; simplify_eq; eauto|done]. }
       assert (bn = Z.of_nat ci) as -> by (apply (Hbidsn _ _ Hblkn)).
       destruct blocksn as [|[fn fbn] blocksn']; first done.
-      iDestruct (big_sepL_lookup_acc with "Hchn") as "[Hblk Hrest]"; first exact Hblkn.
+      assert (wrap_ton = fn) as -> by (simpl in Hwrap_inn; congruence).
+      iDestruct (is_block_chain_lookup with "Hchn") as "[Hblk Hrest]"; [exact Hblkn|lia|].
       iDestruct "Hblk" as (ecn) "(Hn & Hb & Hecn & Hsl)".
       set (nxt := block_next ((fn,fbn)::blocksn') ci fn). wp_load.
       assert (∃ ni, ((fn,fbn)::blocksn').*1 !! ni = Some nxt) as [ni Hni].
@@ -1196,7 +1240,7 @@ Section spec.
       { apply mono_list_included. }
       iDestruct ("Hrest" with "[Hn Hb Hecn Hsl]") as "Hch"; first (iExists ecn; iFrame).
       iModIntro. iSplitR "Hwtok HΦ".
-      { iNext. iExists Ln,hn,tn,lvn,hbn,tbn,capn,((fn,fbn)::blocksn'),hin,tin,Cn,Wn. iFrame. done. }
+      { iNext. iExists Ln,hn,tn,lvn,hbn,tbn,capn,((fn,fbn)::blocksn'),hin,tin,Cn,Wn,rsn,fn. iFrame. done. }
       wp_pures.
       destruct (decide (nxt = start)) as [->|Hns].
       + rewrite bool_decide_eq_true_2; last done.
@@ -1222,10 +1266,10 @@ Section spec.
     iLöb as "IH" forall (Φ).
     wp_rec. wp_pures.
     wp_bind (! _)%E.
-    iInv "Hinv" as (L' h t lock_val hb tb cap blocks hi ti C W')
+    iInv "Hinv" as (L' h t lock_val hb tb cap blocks hi ti C W' rs' wrap_to')
       ">(Ha & Hba & Hh & Ht & Hcl & Hwl & %Ht_eq & %Hht & Hlk & %Hlv &
          Hhb & Hhl & Htb & Htl & Hcap &
-         %Hne & %Hhi & %Htb_in & %Hti & %Htilast & %Hbids & %Hcfresh & %Hwfresh & Hgvlk & Hgv & Hch)".
+         %Hne & %Hhi & %Htb_in & %Hti & %Htilast & %Hbids & %Hcfresh & %Hwfresh & Hgvlk & Hgv & %Hrs_le_hi & %Hwrap_in & Hch)".
     wp_load.
     iDestruct (own_mono _ _ (◯ML (blocks.*1 : list (leibnizO loc))) with "Hba") as "#Hlb_blocks".
     { apply mono_list_included. }
@@ -1233,7 +1277,7 @@ Section spec.
     assert (∃ ci, blocks.*1 !! ci = Some tb) as Hcursor_in.
     { exists ci_tb. rewrite list_lookup_fmap Hci_tb. done. }
     iModIntro. iSplitR "HΦ Hwtok".
-    { iNext. iExists L', h, t, lock_val, hb, tb, cap, blocks, hi, ti, C, W'.
+    { iNext. iExists L', h, t, lock_val, hb, tb, cap, blocks, hi, ti, C,W',rs',wrap_to'.
       iFrame. done. }
     wp_pures.
     wp_bind (chunked_queue_push_find_block _ _ _ _ _)%E.
@@ -1256,10 +1300,10 @@ Section spec.
     unfold chunked_queue_push. wp_pures.
     (* === FAA linearization point === *)
     wp_bind (FAA _ _).
-    iInv "Hinv" as (L h t lock_val hb tb cap blocks hi ti C W)
+    iInv "Hinv" as (L h t lock_val hb tb cap blocks hi ti C W rs wrap_to)
       ">(Hauth & Hblk_auth & Hhead & Htail & Hclaims & Hwrites & %Ht & %Hht & Hlock & %Hlock_val &
          Hhb & Hh & Htb & Htail_loc & Hcap &
-         %Hblocks_ne & %Hhi & %Htb_in & %Hti & %Htilast & %Hbids & %Hcfresh & %Hwfresh & Hgvlk & Hgv & Hchain)".
+         %Hblocks_ne & %Hhi & %Htb_in & %Hti & %Htilast & %Hbids & %Hcfresh & %Hwfresh & Hgvlk & Hgv & %Hrs_le_hi & %Hwrap_in & Hchain)".
     wp_faa.
     (* Open AU, agree on ghost state *)
     iMod "AU" as (L' h') "[Hcontent [_ Hclose]]".
@@ -1298,7 +1342,7 @@ Section spec.
     iSplitR "HΦ Hwtok".
     { iModIntro. iNext. unfold queue_inv_inner.
       iExists (L ++ [v]), h, (length L + 1)%nat, lock_val, hb, tb,
-        cap, blocks, hi, ti, C, (<[length L := ()]> W).
+        cap, blocks, hi, ti, C, (<[length L := ()]> W), rs, wrap_to.
       replace (length L + 1)%Z with (Z.of_nat (length L + 1)%nat) in *
         by lia.
       rewrite app_length. simpl.
@@ -1306,10 +1350,12 @@ Section spec.
       repeat iSplit; try (iPureIntro; first [done | lia]).
       { iPureIntro. intros k Hk. rewrite lookup_insert_ne; [apply Hwfresh; lia | lia]. }
       destruct blocks as [|[first bid] blocks']; first done.
+      subst rs.
       iApply (big_sepL_mono with "Hchain").
       iIntros (k [b bid'] Hlookup) "Hblock".
-      unfold is_block. iDestruct "Hblock" as (ec_k) "(Hnext & Hbid & Hec_k & Hslots)".
-      iExists ec_k. iFrame "Hnext Hbid Hec_k".
+      iEval (simpl) in "Hblock". simpl.
+      unfold is_block. iDestruct "Hblock" as (ec_k) "(Hnext & Hbid & Hec_k & %Hec_bounds & Hslots)".
+      iExists ec_k. iFrame "Hnext Hbid Hec_k". iSplit; [iPureIntro; exact Hec_bounds|].
       iApply (big_sepL_mono with "Hslots").
       iIntros (i x Hlookup2) "Hslot".
       unfold slot_inv. iDestruct "Hslot" as (state) "[Hstate Hcases]".
@@ -1338,10 +1384,10 @@ Section spec.
         iLöb as "IH_acq".
         unfold acquire. wp_rec. wp_pures.
         wp_bind (CmpXchg _ _ _)%E.
-        iInv "Hinv" as (La ha ta lva hba tba capa blocksa hia tia Ca Wa)
+        iInv "Hinv" as (La ha ta lva hba tba capa blocksa hia tia Ca Wa rsa wrap_toa)
           ">(Haa & Hbaa & Hha & Hta & Hcla & Hwra & %Hta_eq & %Hhta & Hlka & %Hlva &
              Hhba & Hhla & Htba & Htla & Hcapa &
-             %Hnea & %Hhia & %Htb_ina & %Htia & %Htilasta & %Hbidsa & %Hcfresha & %Hwfresha & Hgvlka & Hgva & Hcha)".
+             %Hnea & %Hhia & %Htb_ina & %Htia & %Htilasta & %Hbidsa & %Hcfresha & %Hwfresha & Hgvlka & Hgva & %Hrs_le_hia & %Hwrap_ina & Hcha)".
         destruct Hlva as [Hlv0|Hlv1].
         ** (* lock = 0, CAS succeeds *)
            subst lva. simpl in Htia, Htilasta.
@@ -1351,15 +1397,15 @@ Section spec.
            { apply mono_list_included. }
            iModIntro.
            iSplitR "HΦ Hwtok Hgvlka".
-           { iNext. iExists La,ha,ta,1%Z,hba,tba,capa,blocksa,hia,tia,Ca,Wa.
+           { iNext. iExists La,ha,ta,1%Z,hba,tba,capa,blocksa,hia,tia,Ca,Wa,rsa,wrap_toa.
              iFrame. simpl. repeat iSplit; try (iPureIntro; first [done | lia | right; done]). }
            wp_pures.
            (* load tail pointer *)
            wp_bind (! _)%E.
-           iInv "Hinv" as (Lb hb_ tb_ lvb hbb tbb capb blocksb hib tib Cb Wb)
+           iInv "Hinv" as (Lb hb_ tb_ lvb hbb tbb capb blocksb hib tib Cb Wb rsb wrap_tob)
              ">(Hab & Hbab & Hhb_ & Htb_ & Hclb & Hwrb & %Htb_eq & %Hhtb & Hlkb & %Hlvb &
                 Hhbb & Hhlb & Htbb & Htlb & Hcapb &
-                %Hneb & %Hhib_ & %Htb_inb & %Htib & %Htilastb & %Hbidsb & %Hcfreshb & %Hwfreshb & Hgvlkb & Hgvb & Hchb)".
+                %Hneb & %Hhib_ & %Htb_inb & %Htib & %Htilastb & %Hbidsb & %Hcfreshb & %Hwfreshb & Hgvlkb & Hgvb & %Hrs_le_hib & %Hwrap_inb & Hchb)".
            wp_load.
            iDestruct (own_mono _ _ (◯ML (blocksb.*1 : list (leibnizO loc))) with "Hbab") as "#Hlb_tail".
            { apply mono_list_included. }
@@ -1394,7 +1440,7 @@ Section spec.
            { lia. }
            iModIntro.
            iSplitR "HΦ Hwtok Hgvlka".
-           { iNext. iExists Lb,hb_,tb_,lvb,hbb,tbb,capb,blocksb,hib,tib,Cb,Wb. iFrame. done. }
+           { iNext. iExists Lb,hb_,tb_,lvb,hbb,tbb,capb,blocksb,hib,tib,Cb,Wb,rsb,wrap_tob. iFrame. done. }
            wp_pures.
            (* call grow loop *)
            wp_bind (chunked_queue_push_grow_loop _ _ _)%E.
@@ -1408,10 +1454,10 @@ Section spec.
            wp_pures.
            (* store new tail *)
            wp_bind (_ <- _)%E.
-           iInv "Hinv" as (Lc hc tc lvc hbc tbc capc blocksc hic tic Cc Wc)
+           iInv "Hinv" as (Lc hc tc lvc hbc tbc capc blocksc hic tic Cc Wc rsc wrap_toc)
              ">(Hac & Hbac & Hhc & Htc & Hclc & Hwrc & %Htc_eq & %Hhtc & Hlkc & %Hlvc &
                 Hhbc & Hhlc & Htbc & Htlc & Hcapc &
-                %Hnec & %Hhic & %Htb_inc & %Htic & %Htilastc & %Hbidsc & %Hcfreshc & %Hwfreshc & Hgvlkc & Hgvc & Hchc)".
+                %Hnec & %Hhic & %Htb_inc & %Htic & %Htilastc & %Hbidsc & %Hcfreshc & %Hwfreshc & Hgvlkc & Hgvc & %Hrs_le_hic & %Hwrap_inc & Hchc)".
            iDestruct (own_valid_2 with "Hbac Hlb_grow") as %[_ Hpfx_grow]%mono_list_both_dfrac_valid_L.
            assert (blocksc.*1 !! nt = Some new_tail) as Hnt_fmap.
            { eapply prefix_lookup_Some; [|exact Hpfx_grow].
@@ -1434,7 +1480,7 @@ Section spec.
            iMod (ghost_var_update_halves (length blocksc, new_tail) with "Hgvtok Hgvc") as "[Hgvtok Hgvc]".
            iModIntro.
            iSplitR "HΦ Hwtok Hgvtok".
-           { iNext. iExists Lc,hc,tc,1%Z,hbc,new_tail,capc,blocksc,hic,nt,Cc,Wc.
+           { iNext. iExists Lc,hc,tc,1%Z,hbc,new_tail,capc,blocksc,hic,nt,Cc,Wc,rsc,wrap_toc.
              simpl. iFrame. repeat iSplit; try (iPureIntro; first [done | lia]).
              iPureIntro. exists nt. exact Hnt_in_cur. }
            wp_pures.
@@ -1442,10 +1488,10 @@ Section spec.
            wp_bind (release _)%E.
            unfold release. wp_pures.
            wp_bind (_ <- _)%E.
-           iInv "Hinv" as (Ld hd td lvd hbd tbd capd blocksd hid tid Cd Wd)
+           iInv "Hinv" as (Ld hd td lvd hbd tbd capd blocksd hid tid Cd Wd rsd wrap_tod)
              ">(Had & Hbad & Hhd & Htd & Hcld & Hwrd & %Htd_eq & %Hhtd & Hlkd & %Hlvd &
                 Hhbd & Hhld & Htbd & Htld & Hcapd &
-                %Hned & %Hhid & %Htb_ind & %Htid & %Htilastd & %Hbidsd & %Hcfreshd & %Hwfreshd & Hgvlkd & Hgvd & Hchd)".
+                %Hned & %Hhid & %Htb_ind & %Htid & %Htilastd & %Hbidsd & %Hcfreshd & %Hwfreshd & Hgvlkd & Hgvd & %Hrs_le_hid & %Hwrap_ind & Hchd)".
            wp_store.
            iDestruct (ghost_var_agree with "Hgvtok Hgvd") as %Hgv_eq_d.
            injection Hgv_eq_d as Hgv_len_d Hgv_tb_d.
@@ -1467,7 +1513,7 @@ Section spec.
            replace lvd with 1%Z by lia. simpl in Htid, Htilastd.
            iModIntro.
            iSplitR "HΦ Hwtok".
-           { iNext. iExists Ld,hd,td,0%Z,hbd,tbd,capd,blocksd,hid,nt,Cd,Wd.
+           { iNext. iExists Ld,hd,td,0%Z,hbd,tbd,capd,blocksd,hid,nt,Cd,Wd,rsd,wrap_tod.
              simpl. iFrame.
              repeat iSplit; try (iPureIntro; first [done | lia | left; done
                | (exists nt; rewrite -Hgv_tb_d; exact Hnt_in_d)
@@ -1479,7 +1525,7 @@ Section spec.
            replace lva with (1 : Z) by lia.
            wp_cmpxchg_fail. iModIntro.
            iSplitR "HΦ Hwtok".
-           { iNext. iExists La,ha,ta,1%Z,hba,tba,capa,blocksa,hia,tia,Ca,Wa.
+           { iNext. iExists La,ha,ta,1%Z,hba,tba,capa,blocksa,hia,tia,Ca,Wa,rsa,wrap_toa.
              iFrame. repeat iSplit; try (iPureIntro; first [done | lia | right; done]). }
            do 2 wp_pure _. fold acquire. iApply ("IH_acq" with "HΦ Hwtok").
       + (* slot_idx = 0 but pos = 0, no grow *)
@@ -1536,10 +1582,10 @@ Section spec.
     wp_rec. wp_pures.
     (* Load cursor.block_id *)
     wp_bind (! _)%E.
-    iInv "Hinv" as (Li hi ti lvi hbi tbi capi blocksi hii tii Ci Wi)
+    iInv "Hinv" as (Li hi ti lvi hbi tbi capi blocksi hii tii Ci Wi rsi wrap_toi)
       ">(Hai & Hbai & Hhi & Hti & Hclaimsi & Hwritesi & %Hti_eq & %Hhti & Hlki & %Hlvi &
          Hhbi & Hhli & Htbi & Htli & Hcapi &
-         %Hnei & %Hhii & %Htb_ini & %Htii & %Htilasti & %Hbidsi & %Hcfreshi & %Hwfreshi & Hgvlki & Hgvi & Hchi)".
+         %Hnei & %Hhii & %Htb_ini & %Htii & %Htilasti & %Hbidsi & %Hcfreshi & %Hwfreshi & Hgvlki & Hgvi & %Hrs_le_hii & %Hwrap_ini & Hchi)".
     iDestruct (own_valid_2 with "Hbai Hlb_blocks") as %[_ Hpfx]%mono_list_both_dfrac_valid_L.
     assert (blocksi.*1 !! ci = Some cursor) as Hci_cur
       by (eapply prefix_lookup_Some; [exact Hci | exact Hpfx]).
@@ -1548,11 +1594,11 @@ Section spec.
       destruct (blocksi !! ci) as [[? ?]|]; [simpl in *; simplify_eq; eauto|done]. }
     assert (bid_i = Z.of_nat ci) as -> by (apply (Hbidsi _ _ Hcur_blk)).
     destruct blocksi as [|[firsti fbi] blocksi']; first done.
-    iDestruct (big_sepL_lookup_acc with "Hchi") as "[Hblk Hrest]"; first exact Hcur_blk.
+    iDestruct (is_block_chain_lookup with "Hchi") as "[Hblk Hrest]"; [exact Hcur_blk|lia|].
     iDestruct "Hblk" as (eci2) "(Hnext & Hbid & Heci2 & Hslots)". wp_load.
     iDestruct ("Hrest" with "[Hnext Hbid Heci2 Hslots]") as "Hchi"; first (iExists eci2; iFrame).
     iModIntro. iSplitR "Hclaim HΦ".
-    { iNext. iExists Li,hi,ti,lvi,hbi,tbi,capi,((firsti,fbi)::blocksi'),hii,tii,Ci,Wi. iFrame. done. }
+    { iNext. iExists Li,hi,ti,lvi,hbi,tbi,capi,((firsti,fbi)::blocksi'),hii,tii,Ci,Wi,rsi,wrap_toi. iFrame. done. }
     wp_pures.
     destruct (decide (Z.of_nat ci = block_id)) as [Heq|Hne].
     - (* Correct block — enter wait loop *)
@@ -1563,10 +1609,10 @@ Section spec.
       assert (seq 0 BS !! si = Some si) as Hseq by (apply lookup_seq; lia).
       iLöb as "IH_wait".
       wp_pures. wp_bind (! _)%E.
-      iInv "Hinv" as (Lw hw tw lvw hbw tbw capw blocksw hiw tiw Cw Ww)
+      iInv "Hinv" as (Lw hw tw lvw hbw tbw capw blocksw hiw tiw Cw Ww rsw wrap_tow)
         ">(Haw & Hbaw & Hhw & Htw & Hclaimsw & Hwritesw & %Htw & %Hhtw & Hlkw & %Hlvw &
            Hhbw & Hhlw & Htbw & Htlw & Hcapw &
-           %Hnew & %Hhiw & %Htb_inw & %Htiw & %Htilastw & %Hbidsw & %Hcfw & %Hwfw & Hgvlkw & Hgvw & Hchw)".
+           %Hnew & %Hhiw & %Htb_inw & %Htiw & %Htilastw & %Hbidsw & %Hcfw & %Hwfw & Hgvlkw & Hgvw & %Hrs_le_hiw & %Hwrap_inw & Hchw)".
       iDestruct (own_valid_2 with "Hbaw Hlb_blocks") as %[_ Hpfxw]%mono_list_both_dfrac_valid_L.
       assert (blocksw.*1 !! ci = Some cursor) as Hciw
         by (eapply prefix_lookup_Some; [exact Hci | exact Hpfxw]).
@@ -1575,8 +1621,8 @@ Section spec.
         destruct (blocksw !! ci) as [[? ?]|]; [simpl in *; simplify_eq; eauto|done]. }
       assert (bw = Z.of_nat ci) as -> by (apply (Hbidsw _ _ Hblkw)).
       destruct blocksw as [|[fw fbw] blocksw']; first done.
-      iDestruct (big_sepL_lookup_acc with "Hchw") as "[Hblk Hrest]"; first exact Hblkw.
-      iDestruct "Hblk" as (ecw2) "(Hn & Hb & Hecw2 & Hsl)".
+      iDestruct (is_block_chain_lookup with "Hchw") as "[Hblk Hrest]"; [exact Hblkw|lia|].
+      iDestruct "Hblk" as (ecw2) "(Hn & Hb & Hecw2 & %Hecw2_bounds & Hsl)".
       iDestruct (big_sepL_lookup_acc with "Hsl") as "[Hslot Hsl_rest]"; first exact Hseq.
       replace (Z.of_nat si) with slot_idx
         by (subst si; symmetry; apply Z2Nat.id; unfold slot_idx; apply Z.rem_nonneg; lia).
@@ -1588,18 +1634,20 @@ Section spec.
         iDestruct "H0" as "[% Hv]". subst st.
         iDestruct ("Hsl_rest" with "[Hst Hv]") as "Hsl".
         { iExists 0. iFrame. iLeft. iFrame. done. }
-        iDestruct ("Hrest" with "[Hn Hb Hecw2 Hsl]") as "Hch"; first (iExists ecw2; iFrame).
+        iDestruct ("Hrest" with "[Hn Hb Hecw2 Hsl]") as "Hch".
+        { iExists ecw2. iFrame. iPureIntro. exact Hecw2_bounds. }
         iModIntro. iSplitR "Hclaim HΦ IH_wait".
-        { iNext. iExists Lw,hw,tw,lvw,hbw,tbw,capw,((fw,fbw)::blocksw'),hiw,tiw,Cw,Ww. iFrame. done. }
+        { iNext. iExists Lw,hw,tw,lvw,hbw,tbw,capw,((fw,fbw)::blocksw'),hiw,tiw,Cw,Ww,rsw,wrap_tow. iFrame. done. }
         wp_pures.
         iApply ("IH_wait" with "Hclaim HΦ").
       + (* Writing *)
         iDestruct "H1" as "[% Hw1]". subst st.
         iDestruct ("Hsl_rest" with "[Hst Hw1]") as "Hsl".
         { iExists 1. iFrame. iRight. iLeft. iFrame. done. }
-        iDestruct ("Hrest" with "[Hn Hb Hecw2 Hsl]") as "Hch"; first (iExists ecw2; iFrame).
+        iDestruct ("Hrest" with "[Hn Hb Hecw2 Hsl]") as "Hch".
+        { iExists ecw2. iFrame. iPureIntro. exact Hecw2_bounds. }
         iModIntro. iSplitR "Hclaim HΦ IH_wait".
-        { iNext. iExists Lw,hw,tw,lvw,hbw,tbw,capw,((fw,fbw)::blocksw'),hiw,tiw,Cw,Ww. iFrame. done. }
+        { iNext. iExists Lw,hw,tw,lvw,hbw,tbw,capw,((fw,fbw)::blocksw'),hiw,tiw,Cw,Ww,rsw,wrap_tow. iFrame. done. }
         wp_pures.
         iApply ("IH_wait" with "Hclaim HΦ").
       + (* Valid with data *)
@@ -1612,16 +1660,17 @@ Section spec.
         (* Deposit claim, keep value *)
         iDestruct ("Hsl_rest" with "[Hst Hclaim Hw2]") as "Hsl".
         { iExists 2. iFrame. iRight. iRight. iRight. iSplit; [done|]. rewrite Hpos_eq. iFrame. }
-        iDestruct ("Hrest" with "[Hn Hb Hecw2 Hsl]") as "Hch"; first (iExists ecw2; iFrame).
+        iDestruct ("Hrest" with "[Hn Hb Hecw2 Hsl]") as "Hch".
+        { iExists ecw2. iFrame. iPureIntro. exact Hecw2_bounds. }
         iModIntro. iSplitR "Hv HΦ".
-        { iNext. iExists Lw,hw,tw,lvw,hbw,tbw,capw,((fw,fbw)::blocksw'),hiw,tiw,Cw,Ww. iFrame. done. }
+        { iNext. iExists Lw,hw,tw,lvw,hbw,tbw,capw,((fw,fbw)::blocksw'),hiw,tiw,Cw,Ww,rsw,wrap_tow. iFrame. done. }
         wp_pures. wp_load. wp_pures.
         (* Store state ← 0 *)
         wp_bind (_ <- _)%E.
-        iInv "Hinv" as (Lr hr tr lvr hbr tbr capr blocksr hir tir Cr Wr)
+        iInv "Hinv" as (Lr hr tr lvr hbr tbr capr blocksr hir tir Cr Wr rsr wrap_tor)
           ">(Har & Hbar & Hhr & Htr & Hclr & Hwrr & %Htr & %Hhtr & Hlkr & %Hlvr &
              Hhbr & Hhlr & Htbr & Htlr & Hcpr &
-             %Hner & %Hhir & %Htb_inr & %Htir & %Htilastr & %Hbidsr & %Hcfr & %Hwfr & Hgvlkr & Hgvr & Hchr)".
+             %Hner & %Hhir & %Htb_inr & %Htir & %Htilastr & %Hbidsr & %Hcfr & %Hwfr & Hgvlkr & Hgvr & %Hrs_le_hir & %Hwrap_inr & Hchr)".
         iDestruct (own_valid_2 with "Hbar Hlb_blocks") as %[_ Hpfxr]%mono_list_both_dfrac_valid_L.
         assert (blocksr.*1 !! ci = Some cursor) as Hcir
           by (eapply prefix_lookup_Some; [exact Hci | exact Hpfxr]).
@@ -1630,8 +1679,8 @@ Section spec.
           destruct (blocksr !! ci) as [[? ?]|]; [simpl in *; simplify_eq; eauto|done]. }
         assert (br = Z.of_nat ci) as -> by (apply (Hbidsr _ _ Hblkr)).
         destruct blocksr as [|[fr fbr] blocksr']; first done.
-        iDestruct (big_sepL_lookup_acc with "Hchr") as "[Hblk Hrest2]"; first exact Hblkr.
-        iDestruct "Hblk" as (ecr2) "(Hn2 & Hb2 & Hecr2 & Hsl2)".
+        iDestruct (is_block_chain_lookup with "Hchr") as "[Hblk Hrest2]"; [exact Hblkr|lia|].
+        iDestruct "Hblk" as (ecr2) "(Hn2 & Hb2 & Hecr2 & %Hecr2_bounds & Hsl2)".
         iDestruct (big_sepL_lookup_acc with "Hsl2") as "[Hslot2 Hsl2_rest]"; first exact Hseq.
         replace (Z.of_nat si) with slot_idx
           by (subst si; symmetry; apply Z2Nat.id; unfold slot_idx; apply Z.rem_nonneg; lia).
@@ -1642,18 +1691,20 @@ Section spec.
         ** iDestruct "H1r" as "[% Hwr1]". subst str. wp_store.
            iDestruct ("Hsl2_rest" with "[Hstr Hv Hwr1]") as "Hsl2".
            { iExists 0. iFrame. iLeft. iSplit; [done|]. iExists d. iFrame. }
-           iDestruct ("Hrest2" with "[Hn2 Hb2 Hecr2 Hsl2]") as "Hch2"; first (iExists ecr2; iFrame).
+           iDestruct ("Hrest2" with "[Hn2 Hb2 Hecr2 Hsl2]") as "Hch2".
+           { iExists ecr2. iFrame. iPureIntro. exact Hecr2_bounds. }
            iModIntro. iSplitR "HΦ".
-           { iNext. iExists Lr,hr,tr,lvr,hbr,tbr,capr,((fr,fbr)::blocksr'),hir,tir,Cr,Wr. iFrame. done. }
+           { iNext. iExists Lr,hr,tr,lvr,hbr,tbr,capr,((fr,fbr)::blocksr'),hir,tir,Cr,Wr,rsr,wrap_tor. iFrame. done. }
            wp_pures. iApply "HΦ". iLeft. done.
         ** iDestruct "H2r" as "[_ Hvr]". iDestruct "Hvr" as (v') "(Hvr & _ & _)".
            by iDestruct (pointsto_ne with "Hv Hvr") as %[].
         ** iDestruct "H3r" as "(% & Hclr2 & _)". subst str. wp_store.
            iDestruct ("Hsl2_rest" with "[Hstr Hv]") as "Hsl2".
            { iExists 0. iFrame. iLeft. iSplit; [done|]. iExists d. iFrame. }
-           iDestruct ("Hrest2" with "[Hn2 Hb2 Hecr2 Hsl2]") as "Hch2"; first (iExists ecr2; iFrame).
+           iDestruct ("Hrest2" with "[Hn2 Hb2 Hecr2 Hsl2]") as "Hch2".
+           { iExists ecr2. iFrame. iPureIntro. exact Hecr2_bounds. }
            iModIntro. iSplitR "HΦ".
-           { iNext. iExists Lr,hr,tr,lvr,hbr,tbr,capr,((fr,fbr)::blocksr'),hir,tir,Cr,Wr. iFrame. done. }
+           { iNext. iExists Lr,hr,tr,lvr,hbr,tbr,capr,((fr,fbr)::blocksr'),hir,tir,Cr,Wr,rsr,wrap_tor. iFrame. done. }
            wp_pures. iApply "HΦ". iLeft. done.
       + (* Claimed — contradiction, we hold the claim *)
         iDestruct "H3" as "(% & Hcl2 & _)". subst st.
@@ -1662,10 +1713,10 @@ Section spec.
     - (* Wrong block — follow next pointer *)
       rewrite bool_decide_eq_false_2; last (intros Hinj; inversion Hinj; lia).
       wp_pures. wp_bind (! _)%E.
-      iInv "Hinv" as (Ln hn tn lvn hbn tbn capn blocksn hin tin Cn Wn)
+      iInv "Hinv" as (Ln hn tn lvn hbn tbn capn blocksn hin tin Cn Wn rsn wrap_ton)
         ">(Han & Hban & Hhn & Htn & Hcln & Hwrn & %Htn & %Hhtn & Hlkn & %Hlvn &
            Hhbn & Hhln & Htbn & Htln & Hcpn &
-           %Hnen & %Hhin & %Htb_inn & %Htin & %Htilastn & %Hbidsn & %Hcfn & %Hwfn & Hgvlkn & Hgvn & Hchn)".
+           %Hnen & %Hhin & %Htb_inn & %Htin & %Htilastn & %Hbidsn & %Hcfn & %Hwfn & Hgvlkn & Hgvn & %Hrs_le_hin & %Hwrap_inn & Hchn)".
       iDestruct (own_valid_2 with "Hban Hlb_blocks") as %[_ Hpfxn]%mono_list_both_dfrac_valid_L.
       assert (blocksn.*1 !! ci = Some cursor) as Hcin
         by (eapply prefix_lookup_Some; [exact Hci | exact Hpfxn]).
@@ -1674,7 +1725,8 @@ Section spec.
         destruct (blocksn !! ci) as [[? ?]|]; [simpl in *; simplify_eq; eauto|done]. }
       assert (bn = Z.of_nat ci) as -> by (apply (Hbidsn _ _ Hblkn)).
       destruct blocksn as [|[fn fbn] blocksn']; first done.
-      iDestruct (big_sepL_lookup_acc with "Hchn") as "[Hblk Hrest]"; first exact Hblkn.
+      assert (wrap_ton = fn) as -> by (simpl in Hwrap_inn; congruence).
+      iDestruct (is_block_chain_lookup with "Hchn") as "[Hblk Hrest]"; [exact Hblkn|lia|].
       iDestruct "Hblk" as (ecn2) "(Hn & Hb & Hecn2 & Hsl)".
       set (nxt := block_next ((fn,fbn)::blocksn') ci fn). wp_load.
       assert (∃ ni, ((fn,fbn)::blocksn').*1 !! ni = Some nxt) as [ni Hni].
@@ -1685,7 +1737,7 @@ Section spec.
       { apply mono_list_included. }
       iDestruct ("Hrest" with "[Hn Hb Hecn2 Hsl]") as "Hch"; first (iExists ecn2; iFrame).
       iModIntro. iSplitR "Hclaim HΦ".
-      { iNext. iExists Ln,hn,tn,lvn,hbn,tbn,capn,((fn,fbn)::blocksn'),hin,tin,Cn,Wn. iFrame. done. }
+      { iNext. iExists Ln,hn,tn,lvn,hbn,tbn,capn,((fn,fbn)::blocksn'),hin,tin,Cn,Wn,rsn,fn. iFrame. done. }
       wp_pures.
       destruct (decide (nxt = start)) as [->|Hns].
       + rewrite bool_decide_eq_true_2; last done.
@@ -1714,15 +1766,15 @@ Section spec.
     iLöb as "IH" forall (Φ).
     wp_rec. wp_pures.
     wp_bind (! _)%E.
-    iInv "Hinv" as (Lf hf tf lvf hbf tbf capf blocksf hif tif Cf Wf)
+    iInv "Hinv" as (Lf hf tf lvf hbf tbf capf blocksf hif tif Cf Wf rsf wrap_tof)
       ">(Haf & Hbaf & Hhf & Htf & Hclaimsf & Hwritesf & %Htf_eq & %Hhtf & Hlkf & %Hlvf &
          Hhbf & Hhfl & Htbf & Htfl & Hcapf &
-         %Hnef & %Hhif & %Htb_inf & %Htif & %Htilastf & %Hbidsf & %Hcfreshf & %Hwfreshf & Hgvlkf & Hgvf & Hchf)".
+         %Hnef & %Hhif & %Htb_inf & %Htif & %Htilastf & %Hbidsf & %Hcfreshf & %Hwfreshf & Hgvlkf & Hgvf & %Hrs_le_hif & %Hwrap_inf & Hchf)".
     wp_load.
     iDestruct (own_mono _ _ (◯ML (blocksf.*1 : list (leibnizO loc))) with "Hbaf") as "#Hlb_blocksf".
     { apply mono_list_included. }
     iModIntro. iSplitR "HΦ Hclaim".
-    { iNext. iExists Lf, hf, tf, lvf, hbf, tbf, capf, blocksf, hif, tif, Cf, Wf.
+    { iNext. iExists Lf, hf, tf, lvf, hbf, tbf, capf, blocksf, hif, tif, Cf,Wf,rsf,wrap_tof.
       iFrame. done. }
     wp_pures.
     wp_bind (chunked_queue_pop_find_slot _ _ _ _)%E.
@@ -1758,23 +1810,23 @@ Section spec.
     wp_rec. wp_pures.
     (* Load head_idx *)
     wp_bind (! _)%E.
-    iInv "Hinv" as (L1 h1 t1 lv1 hb1 tb1 cap1 blocks1 hi1 ti1 C1 W1)
+    iInv "Hinv" as (L1 h1 t1 lv1 hb1 tb1 cap1 blocks1 hi1 ti1 C1 W1 rs1 wrap_to1)
       ">(Ha1 & Hba1 & Hh1 & Ht1 & Hclaims1 & Hwrites1 & %Ht1 & %Hht1 & Hlk1 & %Hlv1 &
          Hhb1 & Hh1l & Htb1 & Htl1 & Hcap1 &
-         %Hne1 & %Hhi1 & %Htb_in1 & %Hti1 & %Htilast1 & %Hbids1 & %Hcfresh1 & %Hwfresh1 & Hgvlk1 & Hgv1 & Hch1)".
+         %Hne1 & %Hhi1 & %Htb_in1 & %Hti1 & %Htilast1 & %Hbids1 & %Hcfresh1 & %Hwfresh1 & Hgvlk1 & Hgv1 & %Hrs_le_hi1 & %Hwrap_in1 & Hch1)".
     wp_load.
     iDestruct (mono_nat_lb_own_get with "Hh1") as "#Hlb_h1".
     iModIntro. iSplitR "AU".
     { iNext. unfold queue_inv_inner.
-      iExists L1, h1, t1, lv1, hb1, tb1, cap1, blocks1, hi1, ti1, C1, W1.
+      iExists L1, h1, t1, lv1, hb1, tb1, cap1, blocks1, hi1, ti1, C1,W1,rs1,wrap_to1.
       iFrame. done. }
     wp_pures.
     (* Load tail_idx *)
     wp_bind (! _)%E.
-    iInv "Hinv" as (L2 h2 t2 lv2 hb2 tb2 cap2 blocks2 hi2 ti2 C2 W2)
+    iInv "Hinv" as (L2 h2 t2 lv2 hb2 tb2 cap2 blocks2 hi2 ti2 C2 W2 rs2 wrap_to2)
       ">(Ha2 & Hba2 & Hh2 & Ht2 & Hclaims2 & Hwrites2 & %Ht2 & %Hht2 & Hlk2 & %Hlv2 &
          Hhb2 & Hh2l & Htb2 & Htl2 & Hcap2 &
-         %Hne2 & %Hhi2 & %Htb_in2 & %Hti2 & %Htilast2 & %Hbids2 & %Hcfresh2 & %Hwfresh2 & Hgvlk2 & Hgv2 & Hch2)".
+         %Hne2 & %Hhi2 & %Htb_in2 & %Hti2 & %Htilast2 & %Hbids2 & %Hcfresh2 & %Hwfresh2 & Hgvlk2 & Hgv2 & %Hrs_le_hi2 & %Hwrap_in2 & Hch2)".
     wp_load.
     iDestruct (mono_nat_lb_own_valid with "Hh2 Hlb_h1") as %[_ Hh1_le_h2].
     iDestruct (mono_nat_lb_own_get with "Ht2") as "#Hlb_t2".
@@ -1798,7 +1850,7 @@ Section spec.
         - unfold queue_content. iFrame. }
       iModIntro. iSplitR "HΦ".
       { iNext. unfold queue_inv_inner.
-        iExists L2, h1, h1, lv2, hb2, tb2, cap2, blocks2, hi2, ti2, C2, W2.
+        iExists L2, h1, h1, lv2, hb2, tb2, cap2, blocks2, hi2, ti2, C2,W2,rs2,wrap_to2.
         iFrame. done. }
       wp_pures.
       rewrite bool_decide_eq_true_2; last lia.
@@ -1806,17 +1858,17 @@ Section spec.
     + (* Non-empty case: h1 < t2 *)
       iModIntro. iSplitR "AU".
       { iNext. unfold queue_inv_inner.
-        iExists L2, h2, t2, lv2, hb2, tb2, cap2, blocks2, hi2, ti2, C2, W2.
+        iExists L2, h2, t2, lv2, hb2, tb2, cap2, blocks2, hi2, ti2, C2,W2,rs2,wrap_to2.
         iFrame. done. }
       wp_pures.
       rewrite bool_decide_eq_false_2; last lia.
       wp_pures.
       (* CAS on head_idx *)
       wp_bind (CmpXchg _ _ _).
-      iInv "Hinv" as (L3 h3 t3 lv3 hb3 tb3 cap3 blocks3 hi3 ti3 C3 W3)
+      iInv "Hinv" as (L3 h3 t3 lv3 hb3 tb3 cap3 blocks3 hi3 ti3 C3 W3 rs3 wrap_to3)
         ">(Ha3 & Hba3 & Hh3 & Ht3 & Hclaims3 & Hwrites3 & %Ht3 & %Hht3 & Hlk3 & %Hlv3 &
            Hhb3 & Hh3l & Htb3 & Htl3 & Hcap3 &
-           %Hne3 & %Hhi3 & %Htb_in3 & %Hti3 & %Htilast3 & %Hbids3 & %Hcfresh3 & %Hwfresh3 & Hgvlk3 & Hgv3 & Hch3)".
+           %Hne3 & %Hhi3 & %Htb_in3 & %Hti3 & %Htilast3 & %Hbids3 & %Hcfresh3 & %Hwfresh3 & Hgvlk3 & Hgv3 & %Hrs_le_hi3 & %Hwrap_in3 & Hch3)".
       destruct (decide (h3 = h1)) as [->|Hne].
       - (* CAS success *)
         wp_cmpxchg_suc.
@@ -1852,7 +1904,7 @@ Section spec.
         replace (h1 + 1)%Z with (Z.of_nat (S h1)) by lia.
         iModIntro. iSplitR "HΦ Hclaim".
         { iNext. unfold queue_inv_inner.
-          iExists L3, (S h1), t3, lv3, hb3, tb3, cap3, blocks3, hi3, ti3, (<[h1 := ()]> C3), W3.
+          iExists L3, (S h1), t3, lv3, hb3, tb3, cap3, blocks3, hi3, ti3, (<[h1 := ()]> C3), W3, rs3, wrap_to3.
           iFrame. iPureIntro. repeat split; try done; try lia.
           intros k Hk. rewrite lookup_insert_ne; [apply Hcfresh3; lia | lia]. }
         wp_pures.
@@ -1870,25 +1922,25 @@ Section spec.
                wp_rec. wp_pures.
                (* Load old_head = queue.head_block *)
                wp_bind (! _)%E.
-               iInv "Hinv" as (La ha ta lva hba tba capa blocksa hia tia Ca Wa)
+               iInv "Hinv" as (La ha ta lva hba tba capa blocksa hia tia Ca Wa rsa wrap_toa)
                  ">(Haa & Hbaa & Hha & Hta & Hclaimsa & Hwritesa & %Hta_eq & %Hhta & Hlka & %Hlva &
                     Hhba & Hhla & Htba & Htla & Hcapa &
-                    %Hnea & %Hhia & %Htb_ina & %Htia & %Htilasta & %Hbidsa & %Hcfresha & %Hwfresha & Hgvlka & Hgva & Hcha)".
+                    %Hnea & %Hhia & %Htb_ina & %Htia & %Htilasta & %Hbidsa & %Hcfresha & %Hwfresha & Hgvlka & Hgva & %Hrs_le_hia & %Hwrap_ina & Hcha)".
                wp_load.
                (* Save persistent lower bound for blocksa *)
                iDestruct (own_mono _ _ (◯ML (blocksa.*1 : list (leibnizO loc))) with "Hbaa") as "#Hlb_blocksa".
                { apply mono_list_included. }
                iModIntro. iSplitR "IH_adv HΦ Hclaim".
                { iNext. unfold queue_inv_inner.
-                 iExists La, ha, ta, lva, hba, tba, capa, blocksa, hia, tia, Ca, Wa.
+                 iExists La, ha, ta, lva, hba, tba, capa, blocksa, hia, tia, Ca,Wa,rsa,wrap_toa.
                  iFrame. done. }
                wp_pures.
                (* Now need to read hba.block_id — open invariant again *)
                wp_bind (! _)%E.
-               iInv "Hinv" as (Lb hb0 tb0 lvb hbb tbb capb blocksb hib tib Cb Wb)
+               iInv "Hinv" as (Lb hb0 tb0 lvb hbb tbb capb blocksb hib tib Cb Wb rsb wrap_tob)
                  ">(Hab & Hbab & Hhb & Htb & Hclaimsb & Hwritesb & %Htb_eq & %Hhtb & Hlkb & %Hlvb &
                     Hhbb & Hhlb & Htbb & Htlb & Hcapb &
-                    %Hneb & %Hhib & %Htb_inb & %Htib & %Htilastb & %Hbidsb & %Hcfreshb & %Hwfreshb & Hgvlkb & Hgvb & Hchb)".
+                    %Hneb & %Hhib & %Htb_inb & %Htib & %Htilastb & %Hbidsb & %Hcfreshb & %Hwfreshb & Hgvlkb & Hgvb & %Hrs_le_hib & %Hwrap_inb & Hchb)".
                (* Prove hba is in current blocks via prefix *)
                iDestruct (own_valid_2 with "Hbab Hlb_blocksa") as %Hpfx_ab.
                rewrite mono_list_both_dfrac_valid_L in Hpfx_ab.
@@ -1906,7 +1958,7 @@ Section spec.
                  simpl in Hhba_in_b. inversion Hhba_in_b. subst. eauto. }
                assert (bid_b = Z.of_nat hia) as -> by (apply (Hbidsb _ _ Hhba_blk_b)).
                destruct blocksb as [|[firstb firstbid] blocksb']; first done.
-               iDestruct (big_sepL_lookup_acc with "Hchb") as "[Hblk Hchb_rest]"; first exact Hhba_blk_b.
+               iDestruct (is_block_chain_lookup with "Hchb") as "[Hblk Hchb_rest]"; [exact Hhba_blk_b|lia|].
                unfold is_block.
                iDestruct "Hblk" as (ec_hb) "(Hnext_b & Hbid_b & Hec_hb & Hslots_b)".
                wp_load.
@@ -1914,7 +1966,7 @@ Section spec.
                { unfold is_block. iExists ec_hb. iFrame. }
                iModIntro. iSplitR "IH_adv HΦ Hclaim".
                { iNext. unfold queue_inv_inner.
-                 iExists Lb, hb0, tb0, lvb, hbb, tbb, capb, ((firstb, firstbid) :: blocksb'), hib, tib, Cb, Wb.
+                 iExists Lb, hb0, tb0, lvb, hbb, tbb, capb, ((firstb, firstbid) :: blocksb'), hib, tib, Cb,Wb,rsb,wrap_tob.
                  iFrame. done. }
                wp_pures.
                (* block_id ≤ hia? *)
@@ -1929,10 +1981,10 @@ Section spec.
                    wp_pures.
                    (* Read next pointer from hba *)
                    wp_bind (! _)%E.
-                   iInv "Hinv" as (Lc hc tc lvc hbc tbc capc blocksc hic tic Cc Wc)
+                   iInv "Hinv" as (Lc hc tc lvc hbc tbc capc blocksc hic tic Cc Wc rsc wrap_toc)
                      ">(Hac & Hbac & Hhc & Htc & Hclaimsc & Hwritesc & %Htc_eq & %Hhtc & Hlkc & %Hlvc &
                         Hhbc & Hhlc & Htbc & Htlc & Hcapc &
-                        %Hnec & %Hhic & %Htb_inc & %Htic & %Htilastc & %Hbidsc & %Hcfreshc & %Hwfreshc & Hgvlkc & Hgvc & Hchc)".
+                        %Hnec & %Hhic & %Htb_inc & %Htic & %Htilastc & %Hbidsc & %Hcfreshc & %Hwfreshc & Hgvlkc & Hgvc & %Hrs_le_hic & %Hwrap_inc & Hchc)".
                    iDestruct (own_valid_2 with "Hbac Hlb_blocksa") as %Hpfx_ac.
                    rewrite mono_list_both_dfrac_valid_L in Hpfx_ac.
                    destruct Hpfx_ac as [_ Hpfx_ac].
@@ -1949,7 +2001,7 @@ Section spec.
                    iDestruct (own_mono _ _ (◯ML (blocksc.*1 : list (leibnizO loc))) with "Hbac") as "#Hlb_blocksc".
                    { apply mono_list_included. }
                    destruct blocksc as [|[firstc firstcidb] blocksc']; first done.
-                   iDestruct (big_sepL_lookup_acc with "Hchc") as "[Hblk_c Hchc_rest]"; first exact Hhba_blk_c.
+                   iDestruct (is_block_chain_lookup with "Hchc") as "[Hblk_c Hchc_rest]"; [exact Hhba_blk_c|lia|].
                    unfold is_block.
                    iDestruct "Hblk_c" as (ec_hc) "(Hnext_c & Hbid_c & Hec_hc & Hslots_c)".
                    wp_load.
@@ -1957,15 +2009,15 @@ Section spec.
                    { unfold is_block. iExists ec_hc. iFrame. }
                    iModIntro. iSplitR "IH_adv HΦ Hclaim".
                    { iNext. unfold queue_inv_inner.
-                     iExists Lc, hc, tc, lvc, hbc, tbc, capc, ((firstc, firstcidb) :: blocksc'), hic, tic, Cc, Wc.
+                     iExists Lc, hc, tc, lvc, hbc, tbc, capc, ((firstc, firstcidb) :: blocksc'), hic, tic, Cc,Wc,rsc,wrap_toc.
                      iFrame. done. }
                    wp_pures.
                    (* CAS on queue.head_block *)
                    wp_bind (CmpXchg _ _ _).
-                   iInv "Hinv" as (Ld hd td lvd hbd tbd capd blocksd hid tid Cd Wd)
+                   iInv "Hinv" as (Ld hd td lvd hbd tbd capd blocksd hid tid Cd Wd rsd wrap_tod)
                      ">(Had & Hbad & Hhd & Htd & Hclaimsd & Hwritesd & %Htd_eq & %Hhtd & Hlkd & %Hlvd &
                         Hhbd & Hhld & Htbd & Htld & Hcapd &
-                        %Hned & %Hhid & %Htb_ind & %Htid & %Htilastd & %Hbidsd & %Hcfreshd & %Hwfreshd & Hgvlkd & Hgvd & Hchd)".
+                        %Hned & %Hhid & %Htb_ind & %Htid & %Htilastd & %Hbidsd & %Hcfreshd & %Hwfreshd & Hgvlkd & Hgvd & %Hrs_le_hid & %Hwrap_ind & Hchd)".
                    destruct (decide (hbd = hba)) as [->|Hne_hbd].
                    *** (* CAS success: head_block = hba, update to next *)
                        wp_cmpxchg_suc.
@@ -1991,7 +2043,7 @@ Section spec.
                          rewrite Hbn.
                          iModIntro. iSplitR "IH_adv HΦ Hclaim".
                          { iNext. unfold queue_inv_inner.
-                           iExists Ld, hd, td, lvd, next_loc, tbd, capd, blocksd, (S hia), tid, Cd, Wd.
+                           iExists Ld, hd, td, lvd, next_loc, tbd, capd, blocksd, (S hia), tid, Cd,Wd,rsd,wrap_tod.
                            iFrame. iPureIntro. repeat split; try done; try lia. }
                          wp_proj. wp_seq.
                          iApply ("IH_adv" with "HΦ Hclaim").
@@ -2009,7 +2061,7 @@ Section spec.
                          rewrite Hbn.
                          iModIntro. iSplitR "IH_adv HΦ Hclaim".
                          { iNext. unfold queue_inv_inner.
-                           iExists Ld, hd, td, lvd, firstc, tbd, capd, blocksd, 0%nat, tid, Cd, Wd.
+                           iExists Ld, hd, td, lvd, firstc, tbd, capd, blocksd, 0%nat, tid, Cd,Wd,rsd,wrap_tod.
                            iFrame. iPureIntro. repeat split; try done; try lia. }
                          wp_proj. wp_seq.
                          iApply ("IH_adv" with "HΦ Hclaim").
@@ -2017,7 +2069,7 @@ Section spec.
                        wp_cmpxchg_fail.
                        iModIntro. iSplitR "IH_adv HΦ Hclaim".
                        { iNext. unfold queue_inv_inner.
-                         iExists Ld, hd, td, lvd, hbd, tbd, capd, blocksd, hid, tid, Cd, Wd.
+                         iExists Ld, hd, td, lvd, hbd, tbd, capd, blocksd, hid, tid, Cd,Wd,rsd,wrap_tod.
                          iFrame. done. }
                        wp_proj. wp_seq.
                        iApply ("IH_adv" with "HΦ Hclaim").
@@ -2035,7 +2087,7 @@ Section spec.
         wp_cmpxchg_fail. { intros H. inversion H. lia. }
         iModIntro. iSplitR "AU".
         { iNext. unfold queue_inv_inner.
-          iExists L3, h3, t3, lv3, hb3, tb3, cap3, blocks3, hi3, ti3, C3, W3.
+          iExists L3, h3, t3, lv3, hb3, tb3, cap3, blocks3, hi3, ti3, C3,W3,rs3,wrap_to3.
           iFrame. done. }
         wp_proj. wp_if. iApply ("IH" with "AU").
   Defined.
