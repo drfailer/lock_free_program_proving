@@ -17,8 +17,14 @@ grow. The chunks are composed of slots, and each slot stores a data element
 and a state which is used to determine the slot ownership (the slot is empty,
 being written or being read).
 
-The goal is to have a realistic lock-free algorithm to prove, but this does not
-aim to be the most efficient lock-free queue implementation.
+> [!IMPORTANT]
+> The goal is to have a realistic lock-free algorithm to prove, but this does not
+> aim to be the most efficient lock-free queue implementation.
+
+> [!IMPORTANT]
+> I have little experience with formal methods and lock-free programs writing.
+> This experiment represents one way of approaching the problem, but more
+> experienced programmers can end up with better results.
 
 The queue implementation is written in [Odin](https://odin-lang.org/) because it's a simple and amazing
 language!
@@ -31,8 +37,7 @@ This experiment was realized in four steps:
 
 1. **Implementation**: provide code skeleton and data structure description to
    the LLM and let it write the implementation. The proved code can also be
-   hand-written (yes some people still do that), but the LLM's ability to write
-   simple and correct lock-free code was also evaluated here.
+   hand-written.
 2. **Heap-lang**: another agent was asked to port the Odin code to Iris heap-lang.
 3. **Specifications**: for this test, it was chosen to keep the prompts generic
    (see `prompts/`), so the specifications where provided through comments in
@@ -53,7 +58,7 @@ specification, an extra-step was used to fix the code and update the proof.
 The first version of the code that has been proved presented a logic issue that
 was only found later (not through the proof, indicating a hole in the
 specifications). The bug was located in the grow logic: in the original
-version, block reuse (circular linked list) wasn't implemented, and the push
+version, the list was circular, but the blocks where never reused and the push
 function was always reallocating new blocks instead of reusing the empty ones
 behind the head. Correcting this issue required updating both the code and the
 specifications to maintain the correctness of the proof. Note that this logic
@@ -64,9 +69,9 @@ careful enough when reading the AI output and not writing all the
 specifications properly was a mistake. However, this mistake is a good
 demonstration that the proving process only demonstrates the program
 correctness with respect to the specifications, and it is possible to
-successfully prove a wrong program. Note as well that this error had no impact
-on the slot ownership bug introduced on purpose to make sure that AI was able
-to find bugs through the proof.
+successfully prove a wrong program if specifications are incomplete. Note as
+well that this error had no impact on the slot ownership bug introduced on
+purpose to make sure that AI was able to find bugs through the proof.
 
 For the test part, the agent was simply told to write a test that verifies all
 the queues operations. Surprisingly, the AI only wrote a sequential test which
@@ -160,18 +165,20 @@ rewrite them in a way that makes the proving process easier and faster. A skill
 file presenting advanced patterns could also improve the agent performance
 during this phase.
 
-## Solving the reuse bug
-
-TODO
-
 ## Conclusion
 
 The goal of this work was to try to automate all the proving process of a
-concurrent lock-free program using AI. This experiment show an example approach
-for the prompting and specification definitions, and demonstrate how AI can be
-used in concurrent program proving. There are still many things that can be
-improved. For instance, there may be better ways of formulating the constraints
-within prompts to prevent the AI to go out of bounds. Specifications could be
-improved as well to make the proving process smoother. Finally, better tooling
-as well as additional helper context (proper skill) could also improve the
-proof writing.
+concurrent lock-free program using AI. This experiment showed an example
+approach for the prompting and specification definitions, and demonstrate how
+AI can be used in concurrent program proving. There are still many things that
+can be improved. For instance, there may be better ways of formulating the
+constraints within prompts to prevent the AI to go out of bounds.
+Specifications could be improved as well to make the proving process smoother.
+Finally, better tooling as well as additional helper context (proper skill)
+could also improve the proof writing.
+
+AI is a good tool for automating the long mechanical proof writing process.
+However, writing good lock-free programs and defining useful and robust
+specification still requires skill and experience. LLMs can help to make some
+of the repetitive work less tedious, but they cannot solve the whole problem on
+their own.
