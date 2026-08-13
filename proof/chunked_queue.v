@@ -252,7 +252,7 @@ Section spec.
     (b +ₗ 0) ↦ #next ∗
     (b +ₗ 1) ↦ #bid ∗
     (b +ₗ 2) ↦ #ec ∗
-    ⌜(0 ≤ ec)%Z ∧ (ec ≤ CHUNKED_QUEUE_BLOCK_SIZE)%Z⌝ ∗
+    ⌜(0 ≤ ec)%Z⌝ ∗
     [∗ list] i ∈ seq 0 BS,
       slot_inv γc γw L (Z.to_nat bid * BS + i) (b +ₗ (3 + 2 * Z.of_nat i)).
 
@@ -719,17 +719,65 @@ Section spec.
         wp_pures.
 
         (* Store 2: next +ₗ 1 <- ti0 + 1 — set new block_id *)
-        (* BLOCKED: After this store, firsta's physical bid = S ti0 but
-           is_block expects bid = 0 (from blocks list entry at index 0).
-           To close the invariant we need:
-           1. A blocks list where firsta has bid = S ti0
-              (either modify in place or append + skip old entry)
-           2. Proof that all slot_invs can be reindexed from position
-              0*BS+i to (S ti0)*BS+i — requires proving all slots are
-              Empty (position-independent), which needs ec ↔ slot state
-              connection in the invariant
-           3. Relaxation of Hbids (∀ i blk, blocks !! i → snd blk = Z.of_nat i)
-              since reused block at index 0 would have bid ≠ 0 *)
+        wp_bind (_ <- _)%E.
+        iInv "Hinv" as (Le he te lve hbe tbe cape blockse hie tie Ce We rse wrap_toe)
+          ">(Hae & Hbae & Hhe & Hte & Hcle & Hwre & %Hte_eq & %Hhte & Hlke & %Hlve &
+             Hhbe & Hhle & Htbe & Htle & Hcape &
+             %Hnee & %Hhie & %Htb_ine & %Htie & %Htilaste & %Hbidse & %Hcfreshe & %Hwfreshe & Hgvlke & Hgve & %Hrs_le_hie & %Hwrap_ine & Hche)".
+        iDestruct (own_valid_2 with "Hbae Hlba") as %[_ Hpfxe]%mono_list_both_dfrac_valid_L.
+        assert (blockse.*1 !! 0 = Some firsta) as Hfirst_fmape.
+        { eapply prefix_lookup_Some; [|exact Hpfxe]. done. }
+        assert (∃ fbe, blockse !! 0 = Some (firsta, fbe)) as [fbe Hfirst_blke].
+        { rewrite list_lookup_fmap in Hfirst_fmape.
+          destruct (blockse !! 0) as [[? z]|] eqn:Heq; [|done].
+          simpl in Hfirst_fmape. injection Hfirst_fmape as ->. eauto. }
+        assert (fbe = Z.of_nat 0) as -> by (apply (Hbidse _ _ Hfirst_blke)).
+        destruct blockse as [|[firste fbe'] blockse']; first done.
+        simpl in Hfirst_blke. injection Hfirst_blke as -> ->.
+        iDestruct (is_block_chain_lookup with "Hche") as "[Hblke Hreste]".
+        { by apply lookup_cons_Some; left. }
+        { lia. }
+        iDestruct "Hblke" as (ece) "(Hne & Hbide & Hece & %Hec_bounds_e & Hsle)".
+        wp_store.
+        (* After store: firsta +ₗ 1 now holds #(Z.of_nat ti0 + 1).
+           We hold the block's spatial resources:
+             Hne   : (firsta +ₗ 0) ↦ #(block_next ...)  — next ptr
+             Hbide : (firsta +ₗ 1) ↦ #(Z.of_nat ti0 + 1) — NEW bid
+             Hece  : (firsta +ₗ 2) ↦ #ece               — ec
+             Hsle  : [∗ list] slots at positions 0*BS+i  — slots
+
+           INVARIANT CLOSE BLOCKED — requires three prerequisite changes:
+
+           1. INVARIANT REDESIGN: queue_inv_inner must change:
+              a. ⌜rs = 0⌝ → ⌜rs ≤ hi⌝ (allow skipping reused blocks)
+              b. ⌜blocks.*1 !! 0 = Some wrap_to⌝ →
+                 ⌜blocks.*1 !! rs = Some wrap_to⌝
+                 (wrap_to = first ACTIVE block, not necessarily block 0)
+              These changes propagate to ~40 invariant open/close sites
+              and ~10 is_block_chain_lookup lia arguments.
+
+           2. POP SPEC: ghost_map_delete for γ_writes (and γ_claims)
+              when popping transitions a slot to Empty state.
+              Currently, pop drops write/claim tokens affinely, leaving
+              orphaned entries in W/C. Without deletion, we cannot prove
+              W !! (0*BS+i) = None, which is needed to rule out
+              non-Empty slot states for the reused block.
+
+           3. SLOT REINDEXING: With (2), we can prove all slots are in
+              Empty state when ec = BS (destruct each slot_inv; states
+              1,2 require pos ↪[γw] () but ghost_map_auth + W !! pos =
+              None gives contradiction). Empty slots are position-
+              independent (no ghost tokens), so reindexing from 0*BS+i
+              to (S ti0)*BS+i is trivial.
+
+           WITH THOSE CHANGES, the close would:
+           - Append (firsta, Z.of_nat (S ti0)) to blocks list
+           - Set rs = 1, wrap_to = blockse' !! 0
+           - Update mono_list auth (append firsta)
+           - ghost_var_update_halves for lock (new length)
+           - Build is_block_chain for extended list with rs=1
+             (index 0 → True; index S ti0 → reindexed is_block)
+           - Recurse via Löb IH with firsta as new tail *)
         admit.
 
       + (* ec ≠ BS → allocate branch *)
@@ -1695,6 +1743,26 @@ Section spec.
            { iExists ecr2. iFrame. iPureIntro. exact Hecr2_bounds. }
            iModIntro. iSplitR "HΦ".
            { iNext. iExists Lr,hr,tr,lvr,hbr,tbr,capr,((fr,fbr)::blocksr'),hir,tir,Cr,Wr,rsr,wrap_tor. iFrame. done. }
+           wp_pures. wp_bind (FAA _ _)%E.
+           iInv "Hinv" as (Lf hf tf lvf hbf tbf capf blocksf hif tif Cf Wf rsf wrap_tof)
+             ">(Haf & Hbaf & Hhf & Htf & Hclf & Hwrf & %Htf2 & %Hhtf & Hlkf & %Hlvf &
+                Hhbf & Hhlf & Htbf & Htlf & Hcpf &
+                %Hnef & %Hhif2 & %Htb_inf & %Htif & %Htilastf & %Hbidsf & %Hcff & %Hwff & Hgvlkf & Hgvf & %Hrsf & %Hwrap_inf & Hchf)".
+           iDestruct (own_valid_2 with "Hbaf Hlb_blocks") as %[_ Hpfxf]%mono_list_both_dfrac_valid_L.
+           assert (blocksf.*1 !! ci = Some cursor) as Hcif
+             by (eapply prefix_lookup_Some; [exact Hci | exact Hpfxf]).
+           assert (∃ bf, blocksf !! ci = Some (cursor, bf)) as [bf Hblkf].
+           { rewrite list_lookup_fmap in Hcif.
+             destruct (blocksf !! ci) as [[? ?]|]; [simpl in *; simplify_eq; eauto|done]. }
+           assert (bf = Z.of_nat ci) as -> by (apply (Hbidsf _ _ Hblkf)).
+           destruct blocksf as [|[ff fbf] blocksf']; first done.
+           iDestruct (is_block_chain_lookup with "Hchf") as "[Hblkf Hrestf]"; [exact Hblkf|lia|].
+           iDestruct "Hblkf" as (ecf) "(Hnf & Hbidf & Hecf & %Hecf_bounds & Hslf)".
+           wp_faa.
+           iDestruct ("Hrestf" with "[Hnf Hbidf Hecf Hslf]") as "Hchf2".
+           { iExists (ecf + 1)%Z. iFrame. iPureIntro. lia. }
+           iModIntro. iSplitR "HΦ".
+           { iNext. iExists Lf,hf,tf,lvf,hbf,tbf,capf,((ff,fbf)::blocksf'),hif,tif,Cf,Wf,rsf,wrap_tof. iFrame. done. }
            wp_pures. iApply "HΦ". iLeft. done.
         ** iDestruct "H2r" as "[_ Hvr]". iDestruct "Hvr" as (v') "(Hvr & _ & _)".
            by iDestruct (pointsto_ne with "Hv Hvr") as %[].
@@ -1705,6 +1773,26 @@ Section spec.
            { iExists ecr2. iFrame. iPureIntro. exact Hecr2_bounds. }
            iModIntro. iSplitR "HΦ".
            { iNext. iExists Lr,hr,tr,lvr,hbr,tbr,capr,((fr,fbr)::blocksr'),hir,tir,Cr,Wr,rsr,wrap_tor. iFrame. done. }
+           wp_pures. wp_bind (FAA _ _)%E.
+           iInv "Hinv" as (Lf hf tf lvf hbf tbf capf blocksf hif tif Cf Wf rsf wrap_tof)
+             ">(Haf & Hbaf & Hhf & Htf & Hclf & Hwrf & %Htf2 & %Hhtf & Hlkf & %Hlvf &
+                Hhbf & Hhlf & Htbf & Htlf & Hcpf &
+                %Hnef & %Hhif2 & %Htb_inf & %Htif & %Htilastf & %Hbidsf & %Hcff & %Hwff & Hgvlkf & Hgvf & %Hrsf & %Hwrap_inf & Hchf)".
+           iDestruct (own_valid_2 with "Hbaf Hlb_blocks") as %[_ Hpfxf]%mono_list_both_dfrac_valid_L.
+           assert (blocksf.*1 !! ci = Some cursor) as Hcif
+             by (eapply prefix_lookup_Some; [exact Hci | exact Hpfxf]).
+           assert (∃ bf, blocksf !! ci = Some (cursor, bf)) as [bf Hblkf].
+           { rewrite list_lookup_fmap in Hcif.
+             destruct (blocksf !! ci) as [[? ?]|]; [simpl in *; simplify_eq; eauto|done]. }
+           assert (bf = Z.of_nat ci) as -> by (apply (Hbidsf _ _ Hblkf)).
+           destruct blocksf as [|[ff fbf] blocksf']; first done.
+           iDestruct (is_block_chain_lookup with "Hchf") as "[Hblkf Hrestf]"; [exact Hblkf|lia|].
+           iDestruct "Hblkf" as (ecf) "(Hnf & Hbidf & Hecf & %Hecf_bounds & Hslf)".
+           wp_faa.
+           iDestruct ("Hrestf" with "[Hnf Hbidf Hecf Hslf]") as "Hchf2".
+           { iExists (ecf + 1)%Z. iFrame. iPureIntro. lia. }
+           iModIntro. iSplitR "HΦ".
+           { iNext. iExists Lf,hf,tf,lvf,hbf,tbf,capf,((ff,fbf)::blocksf'),hif,tif,Cf,Wf,rsf,wrap_tof. iFrame. done. }
            wp_pures. iApply "HΦ". iLeft. done.
       + (* Claimed — contradiction, we hold the claim *)
         iDestruct "H3" as "(% & Hcl2 & _)". subst st.
@@ -2026,6 +2114,7 @@ Section spec.
                        rewrite mono_list_both_dfrac_valid_L in Hpfx_cd.
                        destruct Hpfx_cd as [_ Hpfx_cd].
                        (* block_next case split: S hia within blocksc or wraps to firstc *)
+                       assert (wrap_toc = firstc) as -> by (simpl in Hwrap_inc; congruence).
                        set (bnext := block_next ((firstc, firstcidb) :: blocksc') hia firstc).
                        destruct (((firstc, firstcidb) :: blocksc') !! (S hia)) as [[next_loc next_bid]|] eqn:Hnext_blk.
                        ---- (* S hia within blocksc: next = block at S hia *)
